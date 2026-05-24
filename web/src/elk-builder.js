@@ -9,7 +9,8 @@
  *   - AlwaysNode.driven_signals       → ドライバ (FF の Q 出力 / Comb の出力)
  *   - AlwaysNode.read_signals         → シンク   (FF の D 入力 / Comb の入力)
  *   - AssignNode.lhs                  → ドライバ
- *   - AssignNode.rhs の識別子         → シンク
+ *   - AssignNode.rhs の三項演算子     → MUX ノード（セレクタ SOUTH、in1/in0 WEST、out EAST）
+ *   - AssignNode.rhs の非三項識別子   → シンク
  */
 
 /** @typedef {{ nodeId: string, portId: string }} Endpoint */
@@ -24,10 +25,56 @@ const SV_KEYWORDS = new Set([
   'posedge','negedge',
 ])
 
-/** assign/always RHS 文字列から SV 識別子を抽出する（過近似） */
+/** assign/always RHS 文字列から SV 識別子を抽出する（過近似）
+ *
+ *  SV 整数リテラル（8'hFF, 2'd3, 1'b0 等）を先に除去することで
+ *  `d3` / `h1F` のような誤検出を防ぐ。
+ */
 function extractIdents(expr) {
-  const matches = expr.match(/\b[a-zA-Z_][a-zA-Z0-9_$]*\b/g) ?? []
+  const stripped = expr.replace(/\d*'[bBdDoOhHsS][0-9a-fA-F_xXzZ]*/g, '')
+  const matches  = stripped.match(/\b[a-zA-Z_][a-zA-Z0-9_$]*\b/g) ?? []
   return [...new Set(matches)].filter(w => !SV_KEYWORDS.has(w))
+}
+
+/**
+ * SV 式文字列を三項演算子で再帰的に分解する。
+ *
+ * ブラケット ( [ ] ( ) { } ) を深さとして追跡し、
+ * 深さ 0 の ? / : のみを三項演算子として認識する。
+ *
+ * @returns {{ isTernary: false, value: string }
+ *          |{ isTernary: true, cond: string, true_: object, false_: object }}
+ */
+function parseTernary(expr) {
+  const s = expr.trim()
+  let depth = 0
+  let qPos  = -1
+
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i]
+    if ('([{'.includes(c))      depth++
+    else if (')]}'.includes(c)) depth--
+    else if (depth === 0 && c === '?' && qPos < 0) { qPos = i; break }
+  }
+  if (qPos < 0) return { isTernary: false, value: s }
+
+  // qPos 以降で深さ 0 の最初の ':' を探す
+  depth = 0
+  let cPos = -1
+  for (let i = qPos + 1; i < s.length; i++) {
+    const c = s[i]
+    if ('([{'.includes(c))      depth++
+    else if (')]}'.includes(c)) depth--
+    else if (depth === 0 && c === ':') { cPos = i; break }
+  }
+  if (cPos < 0) return { isTernary: false, value: s }
+
+  return {
+    isTernary: true,
+    cond:   s.slice(0, qPos).trim(),
+    true_:  parseTernary(s.slice(qPos + 1, cPos)),
+    false_: parseTernary(s.slice(cPos + 1)),
+  }
 }
 
 /**
@@ -48,22 +95,116 @@ export function buildElkGraph(tree, moduleIdx = 0) {
   const children = []
   const edges    = []
   let   eid      = 0
+  let   cstCount = 0   // 定数ノード連番
 
   // signal_name → { sources: Endpoint[], sinks: Endpoint[] }
   const wires = new Map()
 
   /** 配線エンドポイントを登録する */
-  function tap(signal, nodeId, portId, role /* 'source' | 'sink' */) {
+  function tap(signal, nodeId, portId, role) {
     if (!signal) return
     if (!wires.has(signal)) wires.set(signal, { sources: [], sinks: [] })
     wires.get(signal)[role === 'source' ? 'sources' : 'sinks'].push({ nodeId, portId })
   }
 
+  /**
+   * 定数ノードを生成して指定ポートに接続する。
+   * 値が空白のみの場合は何もしない。
+   */
+  function makeConst(value, targetPid) {
+    const label = value.replace(/\s+/g, ' ').trim()
+    if (!label) return
+    const cid    = `const.${cstCount++}`
+    const outPid = `${cid}.out`
+    children.push({
+      id: cid,
+      width:  Math.max(28, label.length * 7 + 12),
+      height: 20,
+      labels: [{ text: label }],
+      ports:  [{ id: outPid, layoutOptions: { 'port.side': 'EAST' } }],
+      layoutOptions: {
+        'portConstraints': 'FIXED_SIDE',
+        'elk.nodeLabels.placement': 'INSIDE V_CENTER H_CENTER',
+      },
+    })
+    edges.push({ id: `e${eid++}`, sources: [outPid], targets: [targetPid] })
+  }
+
+  /**
+   * 三項演算子ツリーを再帰的に MUX ノードへ展開する。
+   *
+   * @param {object} parsed - parseTernary の戻り値
+   * @param {string} prefix - ノード ID の接頭辞（例: "assign.0"）
+   * @param {{ n: number }} cnt - MUX 連番カウンタ（共有参照）
+   * @returns {string|null} このサブ式の出力ポート ID（葉ノードは null）
+   */
+  function buildMux(parsed, prefix, cnt) {
+    if (!parsed.isTernary) return null   // 葉ノード：呼び出し元が tap
+
+    const muxId  = `${prefix}.m${cnt.n++}`
+    const selPid = `${muxId}.sel`
+    const in1Pid = `${muxId}.in1`
+    const in0Pid = `${muxId}.in0`
+    const outPid = `${muxId}.out`
+
+    // セレクタ信号を SOUTH へ接続
+    for (const sig of extractIdents(parsed.cond)) {
+      tap(sig, muxId, selPid, 'sink')
+    }
+
+    // in1 (true パス)
+    const trueOut = buildMux(parsed.true_, prefix, cnt)
+    if (trueOut !== null) {
+      // 内側 MUX の出力 → この MUX の in1
+      edges.push({ id: `e${eid++}`, sources: [trueOut], targets: [in1Pid] })
+    } else {
+      const sigs = extractIdents(parsed.true_.value)
+      if (sigs.length > 0) {
+        for (const sig of sigs) tap(sig, muxId, in1Pid, 'sink')
+      } else {
+        makeConst(parsed.true_.value, in1Pid)   // 純リテラル → 定数ノード
+      }
+    }
+
+    // in0 (false パス)
+    const falseOut = buildMux(parsed.false_, prefix, cnt)
+    if (falseOut !== null) {
+      edges.push({ id: `e${eid++}`, sources: [falseOut], targets: [in0Pid] })
+    } else {
+      const sigs = extractIdents(parsed.false_.value)
+      if (sigs.length > 0) {
+        for (const sig of sigs) tap(sig, muxId, in0Pid, 'sink')
+      } else {
+        makeConst(parsed.false_.value, in0Pid)  // 純リテラル → 定数ノード
+      }
+    }
+
+    children.push({
+      id: muxId,
+      width: 60,
+      height: 68,
+      labels: [{ text: 'MUX' }],
+      ports: [
+        { id: in1Pid, labels: [{ text: '1' }], layoutOptions: { 'port.side': 'WEST' } },
+        { id: in0Pid, labels: [{ text: '0' }], layoutOptions: { 'port.side': 'WEST' } },
+        { id: selPid, labels: [{ text: 'S' }],  layoutOptions: { 'port.side': 'SOUTH' } },
+        { id: outPid,                            layoutOptions: { 'port.side': 'EAST' } },
+      ],
+      layoutOptions: {
+        'portConstraints': 'FIXED_SIDE',
+        'elk.nodeLabels.placement': 'INSIDE V_CENTER H_CENTER',
+      },
+    })
+
+    return outPid
+  }
+
   // ─── 外部ポートノード ─────────────────────────────────────────
   for (const port of mod.ports) {
-    const nid = `ext.${port.name}`
-    const pid = `${nid}.p`
-    const isInput = port.direction === 'Input'
+    const nid      = `ext.${port.name}`
+    const pid      = `${nid}.p`
+    const isInput  = port.direction !== 'Output'   // Input / Inout → 左
+    const isOutput = port.direction === 'Output'
     children.push({
       id: nid,
       width: 52, height: 24,
@@ -71,6 +212,8 @@ export function buildElkGraph(tree, moduleIdx = 0) {
       layoutOptions: {
         'portConstraints': 'FIXED_SIDE',
         'elk.nodeLabels.placement': 'OUTSIDE V_TOP H_CENTER',
+        // 入力を最左層、出力を最右層に強制配置
+        'elk.layered.layering.layerConstraint': isOutput ? 'LAST' : 'FIRST',
       },
       ports: [{
         id: pid,
@@ -82,14 +225,14 @@ export function buildElkGraph(tree, moduleIdx = 0) {
 
   // ─── モジュールインスタンス ───────────────────────────────────
   for (const inst of mod.instances) {
-    const nid = `inst.${inst.instance_name}`
+    const nid       = `inst.${inst.instance_name}`
     const childDirs = modulePortDirs.get(inst.module_name) ?? new Map()
-    const ports = []
+    const ports     = []
 
     for (const conn of inst.port_connections) {
-      const pid = `${nid}.${conn.port_name}`
-      const dir = childDirs.get(conn.port_name) ?? 'Input'
-      const isIn = dir === 'Input'
+      const pid   = `${nid}.${conn.port_name}`
+      const dir   = childDirs.get(conn.port_name) ?? 'Input'
+      const isIn  = dir === 'Input'
       ports.push({
         id: pid,
         labels: [{ text: conn.port_name }],
@@ -138,7 +281,6 @@ export function buildElkGraph(tree, moduleIdx = 0) {
         })
         tap(always.reset.signal_name, nid, pid, 'sink')
       }
-
       // D 入力ポート: read_signals (WEST)
       for (const sig of (always.read_signals ?? [])) {
         const pid = `${nid}.D.${sig}`
@@ -149,7 +291,6 @@ export function buildElkGraph(tree, moduleIdx = 0) {
         })
         tap(sig, nid, pid, 'sink')
       }
-
       // CLK ポート (SOUTH)
       if (always.clock) {
         const pid = `${nid}.CLK`
@@ -160,7 +301,6 @@ export function buildElkGraph(tree, moduleIdx = 0) {
         })
         tap(always.clock.signal_name, nid, pid, 'sink')
       }
-
       // Q 出力ポート (EAST)
       for (const sig of always.driven_signals) {
         const pid = `${nid}.Q.${sig}`
@@ -182,7 +322,6 @@ export function buildElkGraph(tree, moduleIdx = 0) {
         })
         tap(sig, nid, pid, 'sink')
       }
-
       // driven_signals が出力ポート (EAST)
       for (const sig of always.driven_signals) {
         const pid = `${nid}.out.${sig}`
@@ -212,29 +351,39 @@ export function buildElkGraph(tree, moduleIdx = 0) {
   // ─── assign 文ノード ─────────────────────────────────────────
   mod.assigns.forEach((assign, i) => {
     const nid    = `assign.${i}`
-    const outPid = `${nid}.out`
-    const ports  = [{ id: outPid, layoutOptions: { 'port.side': 'EAST' } }]
-    tap(assign.lhs, nid, outPid, 'source')
+    const parsed = parseTernary(assign.rhs)
 
-    // RHS から識別子を抽出して WEST 入力ポートに接続
-    const rhsIdents = extractIdents(assign.rhs)
-    for (const sig of rhsIdents) {
-      const inPid = `${nid}.in.${sig}`
-      ports.push({ id: inPid, layoutOptions: { 'port.side': 'WEST' } })
-      tap(sig, nid, inPid, 'sink')
+    if (parsed.isTernary) {
+      // 三項演算子 → MUX ノード群に展開
+      const cnt      = { n: 0 }
+      const outPortId = buildMux(parsed, nid, cnt)
+      // 最外 MUX の出力ポートを LHS 信号のソースとして登録
+      const outerMuxId = outPortId.replace(/\.out$/, '')
+      tap(assign.lhs, outerMuxId, outPortId, 'source')
+    } else {
+      // 非三項 assign → 小さな assign ノード（RHS 識別子を WEST 入力）
+      const outPid = `${nid}.out`
+      const ports  = [{ id: outPid, layoutOptions: { 'port.side': 'EAST' } }]
+      tap(assign.lhs, nid, outPid, 'source')
+
+      const rhsIdents = extractIdents(assign.rhs)
+      for (const sig of rhsIdents) {
+        const inPid = `${nid}.in.${sig}`
+        ports.push({ id: inPid, layoutOptions: { 'port.side': 'WEST' } })
+        tap(sig, nid, inPid, 'sink')
+      }
+      children.push({
+        id: nid,
+        width: 20,
+        height: Math.max(20, rhsIdents.length * 12 + 8),
+        labels: [],
+        ports,
+        layoutOptions: { 'portConstraints': 'FIXED_SIDE' },
+      })
     }
-
-    children.push({
-      id: nid,
-      width: 20,
-      height: Math.max(20, rhsIdents.length * 12 + 8),
-      labels: [],
-      ports,
-      layoutOptions: { 'portConstraints': 'FIXED_SIDE' },
-    })
   })
 
-  // ─── エッジ生成 ──────────────────────────────────────────────
+  // ─── エッジ生成（信号ルーティング）──────────────────────────
   for (const [, wire] of wires) {
     for (const src of wire.sources) {
       for (const snk of wire.sinks) {

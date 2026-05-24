@@ -104,11 +104,27 @@ fn extract_rhs_from_net_assign(
     na: &sv_parser::NetAssignment,
     tree: &SyntaxTree,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    use sv_parser::unwrap_locate;
-    for node in na {
-        if let RefNode::Expression(expr) = node {
-            if let Some(loc) = unwrap_locate!(expr) {
-                if let Some(s) = tree.get_str(loc) {
+    use sv_parser::Locate;
+
+    for outer in na {
+        if let RefNode::Expression(expr) = outer {
+            // Expression 内の全 Locate を走査してスパン全体を求める。
+            // unwrap_locate! は先頭トークンしか返さないため、
+            // 複数トークンの式（a + b、sel ? a : b 等）ではスパンが足りない。
+            let mut min_offset = usize::MAX;
+            let mut max_end    = 0usize;
+
+            for inner in expr {
+                if let RefNode::Locate(loc) = inner {
+                    if loc.offset < min_offset { min_offset = loc.offset; }
+                    let end = loc.offset + loc.len;
+                    if end > max_end { max_end = end; }
+                }
+            }
+
+            if min_offset < usize::MAX && max_end > min_offset {
+                let span = Locate { offset: min_offset, len: max_end - min_offset, line: 0 };
+                if let Some(s) = tree.get_str(&span) {
                     return Ok(s.trim().to_string());
                 }
             }

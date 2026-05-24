@@ -15,6 +15,8 @@ const STYLE = {
   nodeStrokeWidth: 1.5,
   extFill:         '#eef0ff',
   extStroke:       '#8899cc',
+  constFill:       '#fffbe6',   // 定数ノード: 薄い黄色
+  constStroke:     '#c8a020',
   portFill:        '#5566cc',
   portSize:        8,
   edgeStroke:      '#5566cc',
@@ -98,9 +100,14 @@ export function renderToSvg(layout) {
     const nw = node.width  ?? 0
     const nh = node.height ?? 0
 
-    const isExt = node.id.startsWith('ext.')
-    const fill   = isExt ? STYLE.extFill   : STYLE.nodeFill
-    const stroke = isExt ? STYLE.extStroke : STYLE.nodeStroke
+    const isExt   = node.id.startsWith('ext.')
+    const isConst = node.id.startsWith('const.')
+    const fill    = isExt   ? STYLE.extFill
+                  : isConst ? STYLE.constFill
+                  :           STYLE.nodeFill
+    const stroke  = isExt   ? STYLE.extStroke
+                  : isConst ? STYLE.constStroke
+                  :           STYLE.nodeStroke
 
     const isInstNode = node.id.startsWith('inst.')
     const g = el('g', {
@@ -115,10 +122,11 @@ export function renderToSvg(layout) {
       class: 'node-bg',
     }))
 
-    // ラベル (外部ポートは矩形内中央、インスタンスは内部上部)
+    // ラベル (外部ポート・定数は矩形内中央、インスタンスは内部上部)
     const labels = node.labels ?? []
-    if (isExt && labels[0]) {
-      g.appendChild(text(labels[0].text, nx + nw / 2, ny + nh / 2 + 4))
+    if ((isExt || isConst) && labels[0]) {
+      g.appendChild(text(labels[0].text, nx + nw / 2, ny + nh / 2 + 4,
+        { size: STYLE.subLabelSize, fill: isConst ? '#7a6010' : '#1d1d1f' }))
     } else {
       if (labels[0]) {
         g.appendChild(text(labels[0].text, nx + nw / 2, ny + 14, { bold: true }))
@@ -136,12 +144,14 @@ export function renderToSvg(layout) {
       const py = ny + (port.y ?? 0)
       const ps = STYLE.portSize
 
-      // ポート矩形
-      g.appendChild(el('rect', {
-        x: px - ps / 2, y: py - ps / 2,
-        width: ps, height: ps,
-        fill: STYLE.portFill, rx: 1,
-      }))
+      // 定数ノードはポートドットを描かない
+      if (!isConst) {
+        g.appendChild(el('rect', {
+          x: px - ps / 2, y: py - ps / 2,
+          width: ps, height: ps,
+          fill: STYLE.portFill, rx: 1,
+        }))
+      }
 
       // ポートラベル（インスタンスのみ表示）
       if (!isExt && port.labels?.[0]) {

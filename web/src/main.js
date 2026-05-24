@@ -6,6 +6,46 @@ import { renderToSvg }   from './renderer.js'
 // ─── デフォルトの SV ソース ──────────────────────────────────────
 const DEFAULT_SV = `\
 // ================================================================
+// assign サンプル集
+//
+// mux2       : 単純な assign / 三項演算子
+// priority4  : ネスト三項演算子（優先エンコーダ）
+// ================================================================
+
+// ─── 2入力マルチプレクサ ─────────────────────────────────────
+module mux2 #(
+  parameter int unsigned WIDTH = 8
+)(
+  input  var logic             sel,
+  input  var logic [WIDTH-1:0] a,
+  input  var logic [WIDTH-1:0] b,
+  output var logic [WIDTH-1:0] y,
+  output var logic [WIDTH-1:0] y_and,
+  output var logic [WIDTH-1:0] y_or
+);
+  // 三項演算子による選択
+  assign y     = sel ? a : b;
+  // ビット演算
+  assign y_and = a & b;
+  assign y_or  = a | b;
+endmodule
+
+// ─── 4入力優先エンコーダ ──────────────────────────────────────
+module priority4 (
+  input  var logic [3:0] req,
+  output var logic [1:0] grant,
+  output var logic       valid
+);
+  // ネストした三項演算子
+  assign grant = req[3] ? 2'd3 :
+                 req[2] ? 2'd2 :
+                 req[1] ? 2'd1 :
+                          2'd0;
+  // リダクション演算子
+  assign valid = |req;
+endmodule
+
+// ================================================================
 // 3ステージ パイプライン サンプル
 //
 // 階層:

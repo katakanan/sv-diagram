@@ -95,8 +95,11 @@ fn test_signal_declarations() {
     assert_eq!(m.signals[0].kind, SignalKind::Variable);
 }
 
+// ─── assign テスト群 ──────────────────────────────────────────────
+
+/// 単純な1対1の信号代入
 #[test]
-fn test_assigns() {
+fn test_assign_simple() {
     let sv = r#"
 module t (
   input  var logic clk,
@@ -106,9 +109,105 @@ module t (
   assign y = x;
 endmodule
 "#;
-    let tree = sv_ast_lower::lower(sv, "t.sv").unwrap();
-    println!("assigns: {:?}", tree.modules[0].assigns);
-    assert_eq!(tree.modules[0].assigns.len(), 1, "should have one assign");
-    assert_eq!(tree.modules[0].assigns[0].lhs, "y");
-    assert_eq!(tree.modules[0].assigns[0].rhs, "x");
+    let tree = lower(sv, "t.sv").unwrap();
+    let m = &tree.modules[0];
+    assert_eq!(m.assigns.len(), 1);
+    assert_eq!(m.assigns[0].lhs, "y");
+    assert_eq!(m.assigns[0].rhs, "x");
+}
+
+/// ビット幅付き信号の複数 assign
+#[test]
+fn test_assign_multiple() {
+    let sv = r#"
+module t (
+  input  var logic [7:0] a,
+  input  var logic [7:0] b,
+  output var logic [7:0] sum,
+  output var logic [7:0] diff
+);
+  assign sum  = a + b;
+  assign diff = a - b;
+endmodule
+"#;
+    let tree = lower(sv, "t.sv").unwrap();
+    let m = &tree.modules[0];
+    assert_eq!(m.assigns.len(), 2);
+
+    let sum_a = m.assigns.iter().find(|a| a.lhs == "sum").unwrap();
+    assert_eq!(sum_a.rhs, "a + b");
+
+    let diff_a = m.assigns.iter().find(|a| a.lhs == "diff").unwrap();
+    assert_eq!(diff_a.rhs, "a - b");
+}
+
+/// 三項演算子を含む assign
+#[test]
+fn test_assign_ternary() {
+    let sv = r#"
+module t (
+  input  var logic       sel,
+  input  var logic [7:0] a,
+  input  var logic [7:0] b,
+  output var logic [7:0] y
+);
+  assign y = sel ? a : b;
+endmodule
+"#;
+    let tree = lower(sv, "t.sv").unwrap();
+    let m = &tree.modules[0];
+    assert_eq!(m.assigns.len(), 1);
+    assert_eq!(m.assigns[0].lhs, "y");
+    assert_eq!(m.assigns[0].rhs, "sel ? a : b");
+}
+
+/// ネストした三項演算子 (優先エンコーダ)
+#[test]
+fn test_assign_ternary_nested() {
+    let sv = r#"
+module t (
+  input  var logic [3:0] req,
+  output var logic [1:0] grant
+);
+  assign grant = req[3] ? 2'd3 :
+                 req[2] ? 2'd2 :
+                 req[1] ? 2'd1 :
+                          2'd0;
+endmodule
+"#;
+    let tree = lower(sv, "t.sv").unwrap();
+    let m = &tree.modules[0];
+    assert_eq!(m.assigns.len(), 1);
+    assert_eq!(m.assigns[0].lhs, "grant");
+    // RHS が空でないこと、および先頭トークンが "req" であることを確認
+    assert!(!m.assigns[0].rhs.is_empty());
+    assert!(m.assigns[0].rhs.contains("req"));
+}
+
+/// ビット演算を含む assign
+#[test]
+fn test_assign_bitwise() {
+    let sv = r#"
+module t (
+  input  var logic [7:0] a,
+  input  var logic [7:0] b,
+  input  var logic       en,
+  output var logic [7:0] y,
+  output var logic       any_bit
+);
+  assign y       = (a & b) | {8{en}};
+  assign any_bit = |a;
+endmodule
+"#;
+    let tree = lower(sv, "t.sv").unwrap();
+    let m = &tree.modules[0];
+    assert_eq!(m.assigns.len(), 2);
+
+    let y_a = m.assigns.iter().find(|a| a.lhs == "y").unwrap();
+    assert!(y_a.rhs.contains('&'));
+    assert!(y_a.rhs.contains('|'));
+
+    let any_a = m.assigns.iter().find(|a| a.lhs == "any_bit").unwrap();
+    assert!(any_a.rhs.contains('|'));
+    assert!(any_a.rhs.contains('a'));
 }
