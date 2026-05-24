@@ -117,6 +117,9 @@
     #sv-source-editor .cm-scroller {
       font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
       line-height: 1.6;
+      /* リガチャ（合字）を無効化: <= が ⇐ に、=== が連結表示されるのを防ぐ */
+      font-variant-ligatures: none;
+      font-feature-settings: 'liga' 0, 'calt' 0;
     }
 
     #diagram-wrap {
