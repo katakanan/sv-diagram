@@ -246,9 +246,12 @@ function selectNode(nodeId) {
   // ノードをハイライト
   diagramWrap.querySelector(`.node[data-id="${selectedNodeId}"]`)?.classList.add('selected')
 
-  // ext.* ポートノードなら接続エッジも全てハイライト
-  if (selectedNodeId.startsWith('ext.') && currentLayout) {
-    const portId  = `${selectedNodeId}.p`
+  // ext.* / const.* ノードなら接続エッジも全てハイライト
+  const isExt   = selectedNodeId.startsWith('ext.')
+  const isConst = selectedNodeId.startsWith('const.')
+  if ((isExt || isConst) && currentLayout) {
+    // ext.*   のポートは .p、const.* のポートは .out
+    const portId  = isExt ? `${selectedNodeId}.p` : `${selectedNodeId}.out`
     const portMap = buildPortEdgeMap(currentLayout)
     for (const eid of portMap.get(portId) ?? []) {
       diagramWrap.querySelector(`.edge[data-id="${eid}"]`)?.classList.add('selected')
