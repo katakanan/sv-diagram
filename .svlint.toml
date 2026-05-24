@@ -1,0 +1,293 @@
+# =============================================================================
+# sv_diagram — sv-parser AST 簡易化のための svlint 設定
+# =============================================================================
+#
+# 設計方針:
+#   sv-parser が出力する CST (Concrete Syntax Tree) を
+#   後続の sv-parser-lib crate が扱いやすい形に絞り込む。
+#
+#   sv-parser の RefNode は IEEE 1800-2017 の文法規則を1対1でノード化する。
+#   SVの書き方が複数存在する構文要素は、どれを書いても異なる RefNode になる。
+#   → 使用する構文を1通りに限定することで、パーサー側の match アームを削減する。
+#
+# ルール分類軸:
+#   [A] ノード種別を一本化する  ← AST の match パターン削減に直結
+#   [B] 階層・ラベルを強制する  ← インスタンスパス・generate 名の一意性確保
+#   [C] 宣言スタイルを統一する  ← ポート/信号の型情報抽出を単純化
+#   [D] always ブロック種別を絞る ← クロックドメイン推定の精度向上
+#   [E] テキストスタイル        ← オフセット→行列変換の精度向上
+#
+# 注意:
+#   svlint v0.9 以降は [syntaxrules] / [textrules] セクションが必須。
+#   旧バージョンの [rules] セクションは無効になる。
+#   互いに排他なルールが存在する:
+#     keyword_forbidden_generate  ⟂  keyword_required_generate
+#     keyword_forbidden_always    ⟂  (always を許可するルールとの併用)
+#     genvar_declaration_in_loop  ⟂  genvar_declaration_out_loop
+#   それぞれ片方のみ有効にすること。
+# =============================================================================
+
+[option]
+exclude_paths = []
+prefix_label  = ""
+
+# =============================================================================
+# [syntaxrules]
+# =============================================================================
+
+[syntaxrules]
+
+# ---------------------------------------------------------------------------
+# [A-1] モジュール宣言形式の統一
+#
+# sv-parser は ANSI / Non-ANSI で別の RefNode を生成する:
+#   ANSI     → RefNode::ModuleDeclarationAnsi
+#   Non-ANSI → RefNode::ModuleDeclarationNonansi
+#
+# Non-ANSI ではポートリスト (ModulePortList) とポート宣言 (PortDeclaration) が
+# 分離した異なるノード位置に現れ、ポート情報収集のトラバーサルが複雑になる。
+# ANSI に統一すると RefNode::ModuleDeclarationAnsi のみを扱えばよい。
+#
+# NG: module foo(a, b); input logic a; output logic b; endmodule
+# OK: module foo(input logic a, output logic b); endmodule
+# ---------------------------------------------------------------------------
+module_nonansi_forbidden = true
+
+# ---------------------------------------------------------------------------
+# [A-2] generate キーワードの禁止 → GenerateRegion ノードの除去
+#
+# generate/endgenerate キーワードが存在すると
+# sv-parser は LoopGenerateConstruct を GenerateRegion で包む。
+# generate キーワードを禁止すると GenerateRegion ノードが生成されず、
+# for/if/case generate 構文がモジュール本体に直接現れるためASTが1段浅くなる。
+#
+# ※ keyword_required_generate と排他。両立不可。
+#
+# NG: generate for (...) begin : g ... end endgenerate
+# OK: for (...) begin : g ... end
+# ---------------------------------------------------------------------------
+keyword_forbidden_generate = true
+
+# ---------------------------------------------------------------------------
+# [A-3] wire / reg の禁止 → 信号宣言ノードの統一
+#
+# sv-parser での宣言ノードの対応:
+#   wire  → NetDeclaration (ネット型ノード)
+#   reg   → VariableDeclaration だが古い implicit パス
+#   logic → VariableDeclaration → DataDeclaration → IntegerVectorType
+#
+# logic に統一すると信号宣言が常に同じノードパスを辿る。
+# ネット型 (NetDeclaration) ノードを無視してよくなる。
+#
+# NG: wire [7:0] data;  /  reg clk_r;
+# OK: logic [7:0] data; /  logic clk_r;
+# ---------------------------------------------------------------------------
+keyword_forbidden_wire_reg = true
+
+# ---------------------------------------------------------------------------
+# [A-4] priority / unique / unique0 キーワードの禁止
+#
+# priority case / unique if 等は CaseStatement や ConditionalStatement の
+# 前に UniquePriority ノードが付加される。
+# 禁止することで UniquePriority ノードを match アームに含めなくて済む。
+#
+# NG: unique  case (sel) ...
+# NG: priority if (a) ...
+# ---------------------------------------------------------------------------
+priority_keyword = false
+unique_keyword   = false
+unique0_keyword  = false
+
+# ---------------------------------------------------------------------------
+# [A-5] always キーワードの禁止 → always ブロック種別の確定
+#
+# sv-parser の AlwaysConstruct は AlwaysKeyword で種別が決まる:
+#   always    → EventControl/ProceduralTimingControl が複雑に混在する可能性
+#   always_ff → ProceduralTimingControl に ClockingEvent が確定する
+#   always_comb → 感度リストノードなし (EventControl が付かない)
+#
+# always を禁止し always_ff / always_comb / always_latch のみにすると、
+# AlwaysKeyword の値だけでブロック種別が確定する。
+#
+# NG: always @(posedge clk) begin ... end
+# OK: always_ff @(posedge clk or negedge rst_n) begin ... end
+# ---------------------------------------------------------------------------
+keyword_forbidden_always = true
+
+# ---------------------------------------------------------------------------
+# [A-6] function に automatic を強制
+#
+# automatic なし function は static スコープ (暗黙的な状態保持の可能性)。
+# automatic 強制で FunctionBodyDeclaration のスコープが常に automatic に確定し、
+# 純粋な関数として静的解析できる。
+# ---------------------------------------------------------------------------
+function_with_automatic = true
+
+# ---------------------------------------------------------------------------
+# [B-1] generate for にラベルを強制
+#
+# ラベルがない generate for ループは sv-parser 内部で自動名 (genblk1, genblk2...)
+# が付くが、これはツール依存で確定的でない。
+# ラベルを強制すると LoopGenerateConstruct 内の
+# GenerateBlockIdentifier が常に存在し、階層パスが確定する。
+#
+# NG: for (genvar i=0; i<N; i++) begin ... end
+# OK: for (genvar i=0; i<N; i++) begin : g_array_inst ... end
+# ---------------------------------------------------------------------------
+generate_for_with_label = true
+
+# ---------------------------------------------------------------------------
+# [B-2] generate if にラベルを強制 (同上)
+#
+# NG: if (USE_FEATURE) begin ... end else begin ... end
+# OK: if (USE_FEATURE) begin : g_feature_on ... end
+#     else             begin : g_feature_off ... end
+# ---------------------------------------------------------------------------
+generate_if_with_label = true
+
+# ---------------------------------------------------------------------------
+# [B-3] genvar をループ内で宣言 (C99スタイル)
+#
+# ループ外宣言では genvar が別のスコープのノードとして現れ、
+# ループとの対応付けが困難になる。
+# ループ内宣言にすると genvar が LoopGenerateConstruct の
+# GenvarInitialization 内に確定する。
+#
+# NG: genvar i; for (i=0; i<N; i++) begin : g ...
+# OK: for (genvar i=0; i<N; i++) begin : g ...
+# ---------------------------------------------------------------------------
+genvar_declaration_in_loop  = true
+genvar_declaration_out_loop = false
+
+# ---------------------------------------------------------------------------
+# [B-4] if 文に begin...end を強制
+#
+# ブロックなし if は sv-parser で Statement (単文) が
+# ConditionalStatement に直接ぶら下がる。
+# begin...end を強制すると常に SeqBlock ノードが介在し、
+# 文の境界と入れ子構造が明確になる。
+#
+# NG: if (a) x <= 1;
+# OK: if (a) begin x <= 1; end
+# ---------------------------------------------------------------------------
+if_with_begin = true
+
+# ---------------------------------------------------------------------------
+# [B-5] for 文に begin...end を強制 (同上)
+#
+# NG: for (int i=0; i<N; i++) x[i] <= 0;
+# OK: for (int i=0; i<N; i++) begin x[i] <= 0; end
+# ---------------------------------------------------------------------------
+for_with_begin = true
+
+# ---------------------------------------------------------------------------
+# [C-1] input ポートに var を強制
+#
+# var がない input は文脈によりネット型か変数型か不定になる。
+# var を強制するとポートが変数型 (VariablePortHeader) に確定し、
+# PortDeclaration の型解決ロジックが単純になる。
+#
+# NG: input logic clk
+# OK: input var logic clk
+# ---------------------------------------------------------------------------
+input_with_var  = true
+output_with_var = true
+
+# ---------------------------------------------------------------------------
+# [C-2] enum に明示的な型を強制
+#
+# 型なし enum は DataTypeOrImplicit の implicit ブランチになりビット幅が不明。
+# 型を明示すると IntegerVectorType が確定し、ビット幅をノードから直接取得できる。
+#
+# NG: typedef enum { IDLE, RUN } state_t;
+# OK: typedef enum logic [1:0] { IDLE, RUN } state_t;
+# ---------------------------------------------------------------------------
+enum_with_type = true
+
+# ---------------------------------------------------------------------------
+# [C-3] parameter に明示的な型を強制
+#
+# 型なし parameter は ImplicitDataType になる。
+# 型を明示すると DataType ノードが確定し、型推論なしに幅が取得できる。
+#
+# NG: parameter N = 8;
+# OK: parameter int unsigned N = 8;
+# ---------------------------------------------------------------------------
+parameter_explicit_type = true
+
+# ---------------------------------------------------------------------------
+# [C-4] localparam に明示的な型を強制 (同上)
+#
+# NG: localparam DEPTH = 16;
+# OK: localparam int unsigned DEPTH = 16;
+# ---------------------------------------------------------------------------
+localparam_explicit_type = true
+
+# ---------------------------------------------------------------------------
+# [D-1] level-sensitive always (@(*) 等) を禁止
+#
+# always @(*) は EventControl に wildcard が入る形式。
+# always_comb に置き換えると EventControl ノード自体がなくなり、
+# 組み合わせ論理と明示的に識別できる。
+# ---------------------------------------------------------------------------
+level_sensitive_always = true
+
+# ---------------------------------------------------------------------------
+# [D-2] always_ff 内のブロッキング代入を禁止
+#
+# always_ff でブロッキング代入 (=) を使うと静的なクロック同期解析が不定になる。
+# <= のみにすることで always_ff 内の代入が全て
+# NonblockingAssignment ノードになることが保証される。
+#
+# NG: always_ff @(posedge clk) q = d;
+# OK: always_ff @(posedge clk) q <= d;
+# ---------------------------------------------------------------------------
+blocking_assignment_in_always_ff = true
+
+# ---------------------------------------------------------------------------
+# [D-3] always_comb 内のノンブロッキング代入を禁止
+#
+# always_comb で <= を使うと合成不定。
+# = のみにすることで always_comb 内が全て BlockingAssignment に確定する。
+#
+# NG: always_comb y <= a & b;
+# OK: always_comb y = a & b;
+# ---------------------------------------------------------------------------
+non_blocking_assignment_in_always_comb = true
+
+# ---------------------------------------------------------------------------
+# [D-4] case に default を強制
+#
+# default なし case は CaseItem のリストのみで CaseItemDefault が存在しない。
+# default 強制により CaseItemDefault が必ず存在し、
+# 網羅性チェックが不要になる。
+#
+# NG: case (s) 2'b00: x=0; 2'b01: x=1; endcase
+# OK: case (s) 2'b00: x=0; default: x=1; endcase
+# ---------------------------------------------------------------------------
+case_default = true
+
+# =============================================================================
+# [textrules]
+# =============================================================================
+
+[textrules]
+
+# ---------------------------------------------------------------------------
+# [E-1] タブ文字の禁止
+#
+# sv-parser の Locate はバイトオフセットを返す。
+# タブが存在すると表示幅の仮定 (tab_stop=8 等) が必要になり、
+# オフセット → (line, col) 変換が複雑になる。
+# スペースのみにすることで 1バイト = 1カラムが成立する。
+# ---------------------------------------------------------------------------
+tab_character = true
+
+# ---------------------------------------------------------------------------
+# [E-2] インデント幅の統一 (スペース2つ)
+#
+# ASTの解析には直接影響しないが、
+# インデントを統一することで診断メッセージの列番号が
+# 視覚的な位置と一致し、ユーザーへのエラー表示が正確になる。
+# ---------------------------------------------------------------------------
+style_indent = 2

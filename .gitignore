@@ -1,0 +1,17 @@
+# Rust / Cargo
+/target/
+Cargo.lock
+
+# Claude Code
+.claude/
+
+# エディタ・IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db

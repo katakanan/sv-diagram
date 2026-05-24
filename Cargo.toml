@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "crates/sv-checker",
+    "crates/sv-ast-lower",
+]
+resolver = "2"
