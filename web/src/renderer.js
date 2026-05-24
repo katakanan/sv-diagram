@@ -151,14 +151,16 @@ export function renderToSvg(layout) {
   })
 
   // ─── defs: 矢印マーカー ───────────────────────────────────────
+  // markerUnits="userSpaceOnUse" + viewBox でストローク幅が変わっても
+  // 矢印サイズを固定する（strokeWidth 基準だと選択時に拡大してしまう）
   const defs = el('defs')
   defs.innerHTML = `
-    <marker id="arr" markerWidth="8" markerHeight="8"
-            refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+    <marker id="arr" viewBox="0 0 8 8" markerWidth="12" markerHeight="12"
+            refX="7" refY="3" orient="auto" markerUnits="userSpaceOnUse">
       <path d="M0,0 L0,6 L8,3 z" fill="${STYLE.edgeStroke}"/>
     </marker>
-    <marker id="arr-fb" markerWidth="8" markerHeight="8"
-            refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+    <marker id="arr-fb" viewBox="0 0 8 8" markerWidth="12" markerHeight="12"
+            refX="7" refY="3" orient="auto" markerUnits="userSpaceOnUse">
       <path d="M0,0 L0,6 L8,3 z" fill="${STYLE.edgeStroke}" opacity="0.5"/>
     </marker>
   `

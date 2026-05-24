@@ -402,7 +402,7 @@ export function buildElkGraph(tree, moduleIdx = 0) {
       'algorithm': 'layered',
       'elk.direction': 'RIGHT',
       'elk.layered.spacing.nodeNodeBetweenLayers': '60',
-      'elk.spacing.nodeNode': '28',
+      'elk.spacing.nodeNode': '48',
       'elk.layered.nodePlacement.strategy': 'NETWORK_SIMPLEX',
       'elk.layered.crossingMinimization.strategy': 'LAYER_SWEEP',
       'elk.edgeRouting': 'ORTHOGONAL',
