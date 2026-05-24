@@ -90,7 +90,11 @@ pub struct AlwaysNode {
     pub kind: AlwaysKind,
     pub clock: Option<ClockInfo>,
     pub reset: Option<ResetInfo>,
+    /// このブロックが駆動（書き込む）信号名一覧
     pub driven_signals: Vec<String>,
+    /// このブロックが参照（読み取る）信号名一覧
+    /// clk・rst は除外済み、driven_signals の信号も除外済み
+    pub read_signals: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

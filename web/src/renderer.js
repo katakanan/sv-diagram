@@ -45,19 +45,10 @@ function text(str, x, y, { size = STYLE.labelSize, anchor = 'middle', fill = '#1
 export function renderToSvg(layout) {
   const pad = STYLE.padding
 
-  // バウンディングボックスを計算
-  let maxX = 0, maxY = 0
-  for (const n of layout.children ?? []) {
-    maxX = Math.max(maxX, (n.x ?? 0) + (n.width ?? 0))
-    maxY = Math.max(maxY, (n.y ?? 0) + (n.height ?? 0))
-  }
-  const W = maxX + pad * 2
-  const H = maxY + pad * 2
-
+  // SVG はコンテナ全体を占有する
   const svg = el('svg', {
-    width: W, height: H,
-    viewBox: `0 0 ${W} ${H}`,
-    style: 'background:#fafafa',
+    width: '100%', height: '100%',
+    style: 'background:#fafafa; display:block;',
   })
 
   // ─── defs: 矢印マーカー ───────────────────────────────────────
@@ -74,12 +65,18 @@ export function renderToSvg(layout) {
   `
   svg.appendChild(defs)
 
+  // ─── コンテンツグループ（パン操作で translate が変わる）──────
+  const content = el('g', {
+    class: 'sv-content',
+    transform: `translate(${pad},${pad})`,
+  })
+
   // ─── エッジ（ノードの背面に描画）────────────────────────────
   const edgeGroup = el('g', { class: 'edges' })
   for (const edge of layout.edges ?? []) {
     for (const sec of edge.sections ?? []) {
       const pts = [sec.startPoint, ...(sec.bendPoints ?? []), sec.endPoint]
-      const d = pts.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x + pad},${p.y + pad}`).join(' ')
+      const d = pts.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x},${p.y}`).join(' ')
       edgeGroup.appendChild(el('path', {
         d,
         stroke: STYLE.edgeStroke,
@@ -90,14 +87,14 @@ export function renderToSvg(layout) {
       }))
     }
   }
-  svg.appendChild(edgeGroup)
+  content.appendChild(edgeGroup)
 
   // ─── ノード ──────────────────────────────────────────────────
   const nodeGroup = el('g', { class: 'nodes' })
 
   for (const node of layout.children ?? []) {
-    const nx = (node.x ?? 0) + pad
-    const ny = (node.y ?? 0) + pad
+    const nx = node.x ?? 0
+    const ny = node.y ?? 0
     const nw = node.width  ?? 0
     const nh = node.height ?? 0
 
@@ -105,18 +102,22 @@ export function renderToSvg(layout) {
     const fill   = isExt ? STYLE.extFill   : STYLE.nodeFill
     const stroke = isExt ? STYLE.extStroke : STYLE.nodeStroke
 
-    const g = el('g', { class: 'node', 'data-id': node.id })
+    const isInstNode = node.id.startsWith('inst.')
+    const g = el('g', {
+      class: 'node' + (isInstNode ? ' inst-module' : ''),
+      'data-id': node.id,
+    })
 
-    // 矩形
+    // 背景矩形（選択・ホバーの対象）
     g.appendChild(el('rect', {
       x: nx, y: ny, width: nw, height: nh,
       fill, stroke, 'stroke-width': STYLE.nodeStrokeWidth, rx: 3,
+      class: 'node-bg',
     }))
 
     // ラベル (外部ポートは矩形内中央、インスタンスは内部上部)
     const labels = node.labels ?? []
     if (isExt && labels[0]) {
-      // 小さいボックス内に収める
       g.appendChild(text(labels[0].text, nx + nw / 2, ny + nh / 2 + 4))
     } else {
       if (labels[0]) {
@@ -156,6 +157,7 @@ export function renderToSvg(layout) {
     nodeGroup.appendChild(g)
   }
 
-  svg.appendChild(nodeGroup)
+  content.appendChild(nodeGroup)
+  svg.appendChild(content)
   return svg
 }

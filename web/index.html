@@ -57,6 +57,20 @@
     #render-btn:hover { background: #0077ed; }
     #render-btn:disabled { background: #555; cursor: default; }
 
+    #back-btn {
+      background: transparent;
+      color: #bbb;
+      border: 1px solid #555;
+      border-radius: 6px;
+      padding: 5px 14px;
+      font-size: 13px;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+      white-space: nowrap;
+    }
+    #back-btn:not(:disabled):hover { background: #333; color: #fff; }
+    #back-btn:disabled { opacity: 0.25; cursor: default; }
+
     .workspace {
       display: flex;
       flex: 1;
@@ -101,11 +115,30 @@
 
     #diagram-wrap {
       flex: 1;
-      overflow: auto;
-      padding: 16px;
-      display: flex;
-      align-items: flex-start;
-      justify-content: flex-start;
+      overflow: hidden;
+      cursor: grab;
+      user-select: none;
+      position: relative;
+    }
+    /* パン中: 子要素含めて全て grabbing に上書き */
+    #diagram-wrap.panning,
+    #diagram-wrap.panning * { cursor: grabbing !important; }
+
+    /* ── ノード インタラクション ─────────────────────────── */
+    #diagram-wrap .node { cursor: pointer; }
+
+    /* 選択状態 */
+    #diagram-wrap .node.selected .node-bg {
+      stroke: #ff8800;
+      stroke-width: 2.5px;
+      filter: drop-shadow(0 0 5px rgba(255,136,0,0.55));
+    }
+
+    /* インスタンスノード: ダブルクリックでドリルダウン可能 */
+    #diagram-wrap .node.inst-module:not(.selected):hover .node-bg {
+      stroke: #3399ff;
+      stroke-width: 2px;
+      filter: drop-shadow(0 0 4px rgba(51,153,255,0.45));
     }
 
     #status {
@@ -125,6 +158,7 @@
       表示モジュール:
       <select id="module-select"></select>
     </div>
+    <button id="back-btn" disabled>↑ 上位階層</button>
     <button id="render-btn" disabled>▶ Render</button>
   </header>
 

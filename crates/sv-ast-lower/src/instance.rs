@@ -51,9 +51,24 @@ fn extract_port_connections(
                 .ok_or("missing PortIdentifier")?;
             let port_name = get_str(tree, port_name_node)?;
 
-            let signal = unwrap_node!(conn, SimpleIdentifier)
-                .and_then(|n| get_str(tree, n).ok())
-                .unwrap_or_default();
+            // NamedPortConnectionIdentifier を DFS すると SimpleIdentifier が2つ現れる:
+            //   1つ目 = PortIdentifier の内部識別子 (= port_name と同じ文字列)
+            //   2つ目 = 接続信号名 (Expression 内の HierarchicalIdentifier 等)
+            // なので2つ目を取る。
+            let signal = {
+                let mut count = 0usize;
+                let mut found = None;
+                for n in conn {
+                    if let RefNode::SimpleIdentifier(_) = n {
+                        count += 1;
+                        if count == 2 {
+                            found = get_str(tree, n).ok();
+                            break;
+                        }
+                    }
+                }
+                found.unwrap_or_default()
+            };
 
             connections.push(PortConnection { port_name, signal });
         }

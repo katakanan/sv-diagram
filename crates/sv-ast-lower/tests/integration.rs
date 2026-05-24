@@ -79,6 +79,10 @@ fn test_top_module_instances() {
     assert_eq!(inst.port_connections.len(), 3);
     let clk_conn = inst.port_connections.iter().find(|c| c.port_name == "clk").unwrap();
     assert_eq!(clk_conn.signal, "clk");
+    // ポート名と信号名が異なる場合のテスト（.count(cnt)）
+    // 修正前はポート名 "count" が signal に入ってしまうバグがあった
+    let count_conn = inst.port_connections.iter().find(|c| c.port_name == "count").unwrap();
+    assert_eq!(count_conn.signal, "cnt");
 }
 
 #[test]
@@ -89,4 +93,22 @@ fn test_signal_declarations() {
     assert_eq!(m.signals.len(), 1);
     assert_eq!(m.signals[0].name, "cnt");
     assert_eq!(m.signals[0].kind, SignalKind::Variable);
+}
+
+#[test]
+fn test_assigns() {
+    let sv = r#"
+module t (
+  input  var logic clk,
+  output var logic y
+);
+  logic x;
+  assign y = x;
+endmodule
+"#;
+    let tree = sv_ast_lower::lower(sv, "t.sv").unwrap();
+    println!("assigns: {:?}", tree.modules[0].assigns);
+    assert_eq!(tree.modules[0].assigns.len(), 1, "should have one assign");
+    assert_eq!(tree.modules[0].assigns[0].lhs, "y");
+    assert_eq!(tree.modules[0].assigns[0].rhs, "x");
 }

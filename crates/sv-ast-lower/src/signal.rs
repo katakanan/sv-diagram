@@ -5,7 +5,7 @@ use crate::module::get_str;
 pub fn lower_signals_and_assigns(
     m: &ModuleDeclarationAnsi,
     tree: &SyntaxTree,
-    source: &str,
+    _source: &str,
 ) -> Result<(Vec<SignalNode>, Vec<AssignNode>), Box<dyn std::error::Error>> {
     let mut signals = Vec::new();
     let mut assigns = Vec::new();
@@ -45,14 +45,14 @@ pub fn lower_signals_and_assigns(
                 }
             }
 
-            RefNode::ContinuousAssignVariable(ca) => {
+            RefNode::ContinuousAssignNet(ca) => {
                 for node in ca {
-                    if let RefNode::VariableAssignment(va) = node {
-                        let lhs_node = unwrap_node!(va, SimpleIdentifier)
+                    if let RefNode::NetAssignment(na) = node {
+                        let lhs_node = unwrap_node!(na, SimpleIdentifier)
                             .ok_or("missing lhs in assign")?;
                         let lhs = get_str(tree, lhs_node)?;
 
-                        let rhs = extract_rhs_str(va, tree, source)?;
+                        let rhs = extract_rhs_from_net_assign(na, tree)?;
 
                         assigns.push(AssignNode { lhs, rhs });
                     }
@@ -100,13 +100,12 @@ fn extract_lp_type_str(
     Ok("int".to_string())
 }
 
-fn extract_rhs_str(
-    va: &sv_parser::VariableAssignment,
+fn extract_rhs_from_net_assign(
+    na: &sv_parser::NetAssignment,
     tree: &SyntaxTree,
-    _source: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
     use sv_parser::unwrap_locate;
-    for node in va {
+    for node in na {
         if let RefNode::Expression(expr) = node {
             if let Some(loc) = unwrap_locate!(expr) {
                 if let Some(s) = tree.get_str(loc) {

@@ -2,18 +2,36 @@
  * DiagramTree (sv-ast-lower の出力) を ELKjs 入力グラフへ変換する
  *
  * 信号ルーティング方針:
- *   - モジュールの Input ポート      → ドライバ (ELK source)
- *   - モジュールの Output ポート     → シンク   (ELK target)
- *   - 子インスタンスの Input ポート  → シンク   (同 DiagramTree に定義があれば方向を参照)
- *   - 子インスタンスの Output ポート → ドライバ
- *   - AlwaysNode.driven_signals      → ドライバ (FF の Q 出力 / Comb の出力)
- *   - AssignNode.lhs                 → ドライバ
+ *   - モジュールの Input ポート       → ドライバ (ELK source)
+ *   - モジュールの Output ポート      → シンク   (ELK target)
+ *   - 子インスタンスの Input ポート   → シンク
+ *   - 子インスタンスの Output ポート  → ドライバ
+ *   - AlwaysNode.driven_signals       → ドライバ (FF の Q 出力 / Comb の出力)
+ *   - AlwaysNode.read_signals         → シンク   (FF の D 入力 / Comb の入力)
+ *   - AssignNode.lhs                  → ドライバ
+ *   - AssignNode.rhs の識別子         → シンク
  */
 
 /** @typedef {{ nodeId: string, portId: string }} Endpoint */
 
+const SV_KEYWORDS = new Set([
+  'begin','end','if','else','case','casez','casex','endcase','default',
+  'for','while','repeat','forever',
+  'logic','wire','reg','bit','int','integer','byte','shortint','longint',
+  'input','output','inout','ref',
+  'assign','always','always_ff','always_comb','always_latch',
+  'module','endmodule','parameter','localparam',
+  'posedge','negedge',
+])
+
+/** assign/always RHS 文字列から SV 識別子を抽出する（過近似） */
+function extractIdents(expr) {
+  const matches = expr.match(/\b[a-zA-Z_][a-zA-Z0-9_$]*\b/g) ?? []
+  return [...new Set(matches)].filter(w => !SV_KEYWORDS.has(w))
+}
+
 /**
- * @param {object} tree   - DiagramTree (JSON.parseされたもの)
+ * @param {object} tree      - DiagramTree (JSON.parseされたもの)
  * @param {number} moduleIdx - 表示するモジュールのインデックス
  * @returns {object} ELKjs に渡すグラフオブジェクト
  */
@@ -104,18 +122,35 @@ export function buildElkGraph(tree, moduleIdx = 0) {
 
   // ─── always_ff / always_comb / always_latch ───────────────────
   mod.always_blocks.forEach((always, i) => {
-    const nid = `always.${i}`
+    const nid   = `always.${i}`
     const ports = []
-    const isFf = always.kind === 'Ff'
+    const isFf  = always.kind === 'Ff'
 
     if (isFf) {
-      // D 入力（何が繋がるかは信号解析で後から決定）
-      ports.push({
-        id: `${nid}.D`,
-        labels: [{ text: 'D' }],
-        layoutOptions: { 'port.side': 'WEST' },
-      })
-      // CLK
+      // RST ポート (WEST)
+      if (always.reset) {
+        const pid   = `${nid}.RST`
+        const label = always.reset.active_low ? 'RST_N' : 'RST'
+        ports.push({
+          id: pid,
+          labels: [{ text: label }],
+          layoutOptions: { 'port.side': 'WEST' },
+        })
+        tap(always.reset.signal_name, nid, pid, 'sink')
+      }
+
+      // D 入力ポート: read_signals (WEST)
+      for (const sig of (always.read_signals ?? [])) {
+        const pid = `${nid}.D.${sig}`
+        ports.push({
+          id: pid,
+          labels: [{ text: sig }],
+          layoutOptions: { 'port.side': 'WEST' },
+        })
+        tap(sig, nid, pid, 'sink')
+      }
+
+      // CLK ポート (SOUTH)
       if (always.clock) {
         const pid = `${nid}.CLK`
         ports.push({
@@ -125,18 +160,8 @@ export function buildElkGraph(tree, moduleIdx = 0) {
         })
         tap(always.clock.signal_name, nid, pid, 'sink')
       }
-      // RST
-      if (always.reset) {
-        const pid = `${nid}.RST`
-        const label = always.reset.active_low ? 'RST_N' : 'RST'
-        ports.push({
-          id: pid,
-          labels: [{ text: label }],
-          layoutOptions: { 'port.side': 'WEST' },
-        })
-        tap(always.reset.signal_name, nid, pid, 'sink')
-      }
-      // Q 出力
+
+      // Q 出力ポート (EAST)
       for (const sig of always.driven_signals) {
         const pid = `${nid}.Q.${sig}`
         ports.push({
@@ -147,7 +172,18 @@ export function buildElkGraph(tree, moduleIdx = 0) {
         tap(sig, nid, pid, 'source')
       }
     } else {
-      // Comb / Latch: driven_signals が出力ポート
+      // Comb / Latch: read_signals が入力ポート (WEST)
+      for (const sig of (always.read_signals ?? [])) {
+        const pid = `${nid}.in.${sig}`
+        ports.push({
+          id: pid,
+          labels: [{ text: sig }],
+          layoutOptions: { 'port.side': 'WEST' },
+        })
+        tap(sig, nid, pid, 'sink')
+      }
+
+      // driven_signals が出力ポート (EAST)
       for (const sig of always.driven_signals) {
         const pid = `${nid}.out.${sig}`
         ports.push({
@@ -175,45 +211,30 @@ export function buildElkGraph(tree, moduleIdx = 0) {
 
   // ─── assign 文ノード ─────────────────────────────────────────
   mod.assigns.forEach((assign, i) => {
-    const nid = `assign.${i}`
-    const pid = `${nid}.out`
+    const nid    = `assign.${i}`
+    const outPid = `${nid}.out`
+    const ports  = [{ id: outPid, layoutOptions: { 'port.side': 'EAST' } }]
+    tap(assign.lhs, nid, outPid, 'source')
+
+    // RHS から識別子を抽出して WEST 入力ポートに接続
+    const rhsIdents = extractIdents(assign.rhs)
+    for (const sig of rhsIdents) {
+      const inPid = `${nid}.in.${sig}`
+      ports.push({ id: inPid, layoutOptions: { 'port.side': 'WEST' } })
+      tap(sig, nid, inPid, 'sink')
+    }
+
     children.push({
       id: nid,
-      width: 20, height: 20,
+      width: 20,
+      height: Math.max(20, rhsIdents.length * 12 + 8),
       labels: [],
-      ports: [{ id: pid, layoutOptions: { 'port.side': 'EAST' } }],
+      ports,
       layoutOptions: { 'portConstraints': 'FIXED_SIDE' },
     })
-    tap(assign.lhs, nid, pid, 'source')
   })
 
   // ─── エッジ生成 ──────────────────────────────────────────────
-  // FF の D ポートを解決する:
-  // driven_signals のうち FF が駆動するものが同時に他の場所でシンクなら接続
-  for (const always of mod.always_blocks) {
-    if (always.kind !== 'Ff') continue
-    const ffIdx = mod.always_blocks.indexOf(always)
-    const dPid = `always.${ffIdx}.D`
-
-    // driven_signals (= Q 出力) が他のノードのシンクとしても登録されているものを探す
-    // そのシンクの逆サイド (= ドライバ) を D ポートに繋ぐ
-    for (const sig of always.driven_signals) {
-      const wire = wires.get(sig)
-      if (!wire) continue
-      // Q 出力は自身が source なので除外し、外部 sinks が D に入る場合が多い
-      // ここでは同名信号のドライバ (Q) をそのままフィードバックとして D に接続
-      for (const src of wire.sources) {
-        if (src.nodeId === `always.${ffIdx}`) continue // 自己は除外
-        edges.push({
-          id: `e${eid++}`,
-          sources: [src.portId],
-          targets: [dPid],
-        })
-      }
-    }
-  }
-
-  // 通常の信号ルーティング
   for (const [, wire] of wires) {
     for (const src of wire.sources) {
       for (const snk of wire.sinks) {

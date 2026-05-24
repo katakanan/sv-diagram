@@ -21,11 +21,18 @@ pub fn lower_always_blocks(
 
             let driven_signals = extract_driven_signals(always, tree, &kind)?;
 
+            let clock_name = clock.as_ref().map(|c| c.signal_name.as_str());
+            let reset_name = reset.as_ref().map(|r| r.signal_name.as_str());
+            let read_signals = extract_read_signals(
+                always, tree, &driven_signals, clock_name, reset_name,
+            )?;
+
             always_blocks.push(AlwaysNode {
                 kind,
                 clock,
                 reset,
                 driven_signals,
+                read_signals,
             });
         }
     }
@@ -114,6 +121,46 @@ fn extract_edge_kind(
     None
 }
 
+/// always ブロック内で「参照される」信号名を収集する。
+///
+/// always 本体の全 SimpleIdentifier を DFS でスキャンし、
+/// 以下を除外したものを返す:
+///   - driven_signals (駆動する信号 = LHS に現れるもの)
+///   - clock_name / reset_name (already tracked separately)
+///
+/// 過近似になる場合があるが (パラメータ名なども含む)、
+/// elk-builder 側でソースのない信号はエッジが生成されないため問題ない。
+fn extract_read_signals(
+    always: &sv_parser::AlwaysConstruct,
+    tree: &SyntaxTree,
+    driven: &[String],
+    clock_name: Option<&str>,
+    reset_name: Option<&str>,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    use std::collections::HashSet;
+
+    let exclude: HashSet<&str> = driven.iter().map(String::as_str)
+        .chain(clock_name)
+        .chain(reset_name)
+        .collect();
+
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut signals: Vec<String> = Vec::new();
+
+    for node in always {
+        if let RefNode::SimpleIdentifier(_) = node {
+            if let Ok(name) = get_str(tree, node) {
+                if !exclude.contains(name.as_str()) && !seen.contains(&name) {
+                    seen.insert(name.clone());
+                    signals.push(name);
+                }
+            }
+        }
+    }
+
+    Ok(signals)
+}
+
 fn extract_driven_signals(
     always: &sv_parser::AlwaysConstruct,
     tree: &SyntaxTree,
@@ -135,8 +182,8 @@ fn extract_driven_signals(
                 }
             }
             AlwaysKind::Comb | AlwaysKind::Latch => {
-                if let RefNode::BlockingAssignmentVariable(lhs) = node {
-                    if let Some(sig) = unwrap_node!(lhs, SimpleIdentifier) {
+                if let RefNode::BlockingAssignment(ba) = node {
+                    if let Some(sig) = unwrap_node!(ba, SimpleIdentifier) {
                         if let Ok(name) = get_str(tree, sig) {
                             if !signals.contains(&name) {
                                 signals.push(name);
@@ -150,3 +197,4 @@ fn extract_driven_signals(
 
     Ok(signals)
 }
+
