@@ -186,16 +186,22 @@ function selectNode(nodeId) {
 // ─── パン（ドラッグ移動）─────────────────────────────────────
 const PAN_PAD  = 24    // renderer.js の STYLE.padding と同値
 let panOffset  = { x: 0, y: 0 }
+let zoom       = 1.0
 let isPanning  = false
 let panStart   = { x: 0, y: 0 }
 /** mousedown から mousemove が 4px 超えたら true → click イベントを無視する */
 let panMoved   = false
 
-function applyPan() {
+const ZOOM_MIN    = 0.1
+const ZOOM_MAX    = 8.0
+const ZOOM_FACTOR = 1.12   // ホイール1ノッチあたりの倍率
+
+function applyTransform() {
   const g = diagramWrap.querySelector('.sv-content')
   if (!g) return
-  g.setAttribute('transform',
-    `translate(${PAN_PAD + panOffset.x},${PAN_PAD + panOffset.y})`)
+  const tx = PAN_PAD + panOffset.x
+  const ty = PAN_PAD + panOffset.y
+  g.setAttribute('transform', `translate(${tx},${ty}) scale(${zoom})`)
 }
 
 diagramWrap.addEventListener('mousedown', e => {
@@ -213,7 +219,7 @@ window.addEventListener('mousemove', e => {
   const dy = e.clientY - (panStart.y + panOffset.y)
   if (Math.abs(dx) > 4 || Math.abs(dy) > 4) panMoved = true
   panOffset = { x: e.clientX - panStart.x, y: e.clientY - panStart.y }
-  applyPan()
+  applyTransform()
 })
 
 window.addEventListener('mouseup', () => {
@@ -222,6 +228,31 @@ window.addEventListener('mouseup', () => {
   diagramWrap.classList.remove('panning')
   // panMoved はここではリセットしない → 直後の click イベントで参照するため
 })
+
+// ─── ホイール: ズーム（カーソル位置を中心に拡縮）────────────────
+diagramWrap.addEventListener('wheel', e => {
+  e.preventDefault()
+  const rect    = diagramWrap.getBoundingClientRect()
+  const mx      = e.clientX - rect.left   // ダイアグラム内のマウス座標
+  const my      = e.clientY - rect.top
+
+  const delta   = e.deltaY < 0 ? ZOOM_FACTOR : 1 / ZOOM_FACTOR
+  const newZoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, zoom * delta))
+  const ratio   = newZoom / zoom
+
+  // カーソル位置が変わらないよう平行移動を補正する
+  // 変換: translate(PAN_PAD + panOffset.x, ...) scale(zoom)
+  // カーソル下のコンテンツ座標: cx = (mx - PAN_PAD - panOffset.x) / zoom
+  // ズーム後に同じ位置になるには:
+  //   PAN_PAD + newPanX + cx * newZoom = mx
+  //   newPanX = (mx - PAN_PAD)(1 - ratio) + panOffset.x * ratio
+  panOffset = {
+    x: (mx - PAN_PAD) * (1 - ratio) + panOffset.x * ratio,
+    y: (my - PAN_PAD) * (1 - ratio) + panOffset.y * ratio,
+  }
+  zoom = newZoom
+  applyTransform()
+}, { passive: false })
 
 // ─── クリック: ノード選択 ─────────────────────────────────────
 diagramWrap.addEventListener('click', e => {
@@ -284,6 +315,7 @@ function initWasm() {
 async function renderModule(moduleIdx) {
   currentModuleIdx = moduleIdx
   panOffset        = { x: 0, y: 0 }
+  zoom             = 1.0
   selectedNodeId   = null
 
   try {
@@ -308,6 +340,7 @@ async function render() {
   setStatus('解析・レイアウト中...')
   navStack  = []
   panOffset = { x: 0, y: 0 }
+  zoom      = 1.0
   updateBackBtn()
 
   try {
