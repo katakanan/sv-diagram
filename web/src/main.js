@@ -199,6 +199,26 @@ let currentModuleIdx = 0
 /** ドリルダウン履歴: { moduleIdx, moduleName }[] */
 let navStack         = []
 
+/** 最新レイアウト結果（ポート→エッジ逆引き用） */
+let currentLayout = null
+
+/**
+ * ELK レイアウト結果からポート ID → エッジ ID 一覧のマップを構築する。
+ * ext.* ノード選択時に接続エッジをハイライトするために使用。
+ * @param {object} layout - elk.layout() の戻り値
+ * @returns {Map<string, string[]>}
+ */
+function buildPortEdgeMap(layout) {
+  const map = new Map()
+  for (const edge of layout.edges ?? []) {
+    for (const pid of [...(edge.sources ?? []), ...(edge.targets ?? [])]) {
+      if (!map.has(pid)) map.set(pid, [])
+      map.get(pid).push(edge.id)
+    }
+  }
+  return map
+}
+
 function updateBackBtn() {
   if (navStack.length === 0) {
     backBtn.disabled    = true
@@ -215,22 +235,34 @@ let selectedNodeId = null
 let selectedEdgeId = null
 
 function selectNode(nodeId) {
-  diagramWrap.querySelectorAll('.node.selected')
-    .forEach(n => n.classList.remove('selected'))
+  // 前の選択をすべて解除
+  diagramWrap.querySelectorAll('.node.selected').forEach(n => n.classList.remove('selected'))
+  diagramWrap.querySelectorAll('.edge.selected').forEach(e => e.classList.remove('selected'))
   selectedNodeId = nodeId ?? null
-  if (selectedNodeId) {
-    diagramWrap.querySelector(`.node[data-id="${selectedNodeId}"]`)
-      ?.classList.add('selected')
+  selectedEdgeId = null
+
+  if (!selectedNodeId) return
+
+  // ノードをハイライト
+  diagramWrap.querySelector(`.node[data-id="${selectedNodeId}"]`)?.classList.add('selected')
+
+  // ext.* ポートノードなら接続エッジも全てハイライト
+  if (selectedNodeId.startsWith('ext.') && currentLayout) {
+    const portId  = `${selectedNodeId}.p`
+    const portMap = buildPortEdgeMap(currentLayout)
+    for (const eid of portMap.get(portId) ?? []) {
+      diagramWrap.querySelector(`.edge[data-id="${eid}"]`)?.classList.add('selected')
+    }
   }
 }
 
 function selectEdge(edgeId) {
-  diagramWrap.querySelectorAll('.edge.selected')
-    .forEach(e => e.classList.remove('selected'))
+  diagramWrap.querySelectorAll('.node.selected').forEach(n => n.classList.remove('selected'))
+  diagramWrap.querySelectorAll('.edge.selected').forEach(e => e.classList.remove('selected'))
+  selectedNodeId = null
   selectedEdgeId = edgeId ?? null
   if (selectedEdgeId) {
-    diagramWrap.querySelector(`.edge[data-id="${selectedEdgeId}"]`)
-      ?.classList.add('selected')
+    diagramWrap.querySelector(`.edge[data-id="${selectedEdgeId}"]`)?.classList.add('selected')
   }
 }
 
@@ -383,6 +415,7 @@ async function renderModule(moduleIdx) {
   try {
     const elkGraph = buildElkGraph(currentTree, moduleIdx)
     const layout   = await elk.layout(elkGraph)
+    currentLayout  = layout                  // ポート→エッジ逆引き用に保持
     const svg      = renderToSvg(layout)
     diagramWrap.innerHTML = ''
     diagramWrap.appendChild(svg)
