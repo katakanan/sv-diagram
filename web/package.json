@@ -9,7 +9,9 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "elkjs": "^0.9.3"
+    "elkjs": "^0.9.3",
+    "codemirror": "^6.0.1",
+    "@codemirror/legacy-modes": "^6.4.0"
   },
   "devDependencies": {
     "vite": "^5.4.0",

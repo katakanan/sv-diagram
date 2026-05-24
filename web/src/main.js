@@ -2,6 +2,9 @@ import ELK from 'elkjs/lib/elk.bundled.js'
 import { lower_sv } from '../wasm/sv_wasm.js'
 import { buildElkGraph } from './elk-builder.js'
 import { renderToSvg }   from './renderer.js'
+import { EditorView, basicSetup } from 'codemirror'
+import { StreamLanguage }         from '@codemirror/language'
+import { verilog }                from '@codemirror/legacy-modes/mode/verilog'
 
 // ─── デフォルトの SV ソース ──────────────────────────────────────
 const DEFAULT_SV = `\
@@ -183,10 +186,28 @@ const statusEl     = document.getElementById('status')
 const renderBtn    = document.getElementById('render-btn')
 const backBtn      = document.getElementById('back-btn')
 const moduleSelect = document.getElementById('module-select')
-const sourceEl     = document.getElementById('sv-source')
 const diagramWrap  = document.getElementById('diagram-wrap')
 
-sourceEl.value = DEFAULT_SV
+// ─── CodeMirror エディタ初期化 ────────────────────────────────────
+const editor = new EditorView({
+  doc: DEFAULT_SV,
+  extensions: [
+    basicSetup,
+    StreamLanguage.define(verilog),
+    EditorView.theme({
+      // ベースカラーをページの白背景に合わせる
+      '&': { background: '#fff' },
+      '.cm-gutters': {
+        background: '#f5f5f7',
+        borderRight: '1px solid #e0e0e0',
+        color: '#999',
+      },
+      '.cm-activeLineGutter': { background: '#eef0f8' },
+      '.cm-activeLine':       { background: '#eef0f820' },
+    }),
+  ],
+  parent: document.getElementById('sv-source-editor'),
+})
 
 // ─── ELK インスタンス ─────────────────────────────────────────
 const elk = new ELK()
@@ -442,7 +463,7 @@ async function render() {
   updateBackBtn()
 
   try {
-    const json  = lower_sv(sourceEl.value)
+    const json  = lower_sv(editor.state.doc.toString())
     currentTree = JSON.parse(json)
 
     updateModuleSelect(currentTree.modules)
