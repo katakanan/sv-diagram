@@ -210,8 +210,9 @@ function updateBackBtn() {
   }
 }
 
-// ─── ノード選択 ───────────────────────────────────────────────
+// ─── ノード・エッジ選択 ───────────────────────────────────────
 let selectedNodeId = null
+let selectedEdgeId = null
 
 function selectNode(nodeId) {
   diagramWrap.querySelectorAll('.node.selected')
@@ -219,6 +220,16 @@ function selectNode(nodeId) {
   selectedNodeId = nodeId ?? null
   if (selectedNodeId) {
     diagramWrap.querySelector(`.node[data-id="${selectedNodeId}"]`)
+      ?.classList.add('selected')
+  }
+}
+
+function selectEdge(edgeId) {
+  diagramWrap.querySelectorAll('.edge.selected')
+    .forEach(e => e.classList.remove('selected'))
+  selectedEdgeId = edgeId ?? null
+  if (selectedEdgeId) {
+    diagramWrap.querySelector(`.edge[data-id="${selectedEdgeId}"]`)
       ?.classList.add('selected')
   }
 }
@@ -294,11 +305,21 @@ diagramWrap.addEventListener('wheel', e => {
   applyTransform()
 }, { passive: false })
 
-// ─── クリック: ノード選択 ─────────────────────────────────────
+// ─── クリック: ノード・エッジ選択 ────────────────────────────
 diagramWrap.addEventListener('click', e => {
   if (panMoved) { panMoved = false; return }  // ドラッグ後のクリックは無視
   const nodeEl = e.target.closest('.node')
-  selectNode(nodeEl?.dataset.id ?? null)
+  const edgeEl = e.target.closest('.edge')
+  if (nodeEl) {
+    selectEdge(null)
+    selectNode(nodeEl.dataset.id)
+  } else if (edgeEl) {
+    selectNode(null)
+    selectEdge(edgeEl.dataset.id)
+  } else {
+    selectNode(null)
+    selectEdge(null)
+  }
 })
 
 // ─── ダブルクリック: インスタンスにドリルダウン ───────────────
@@ -357,6 +378,7 @@ async function renderModule(moduleIdx) {
   panOffset        = { x: 0, y: 0 }
   zoom             = 1.0
   selectedNodeId   = null
+  selectedEdgeId   = null
 
   try {
     const elkGraph = buildElkGraph(currentTree, moduleIdx)

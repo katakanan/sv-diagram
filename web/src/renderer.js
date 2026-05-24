@@ -195,14 +195,31 @@ export function renderToSvg(layout) {
         }
       }
 
-      edgeGroup.appendChild(el('path', {
+      // エッジグループ: data-id でクリック選択できるようにする
+      const eg = el('g', { class: 'edge', 'data-id': edge.id ?? `e${ei}` })
+
+      // 透明な太いヒットエリア（細い線でも容易にクリックできるよう）
+      eg.appendChild(el('path', {
         d,
+        stroke: 'transparent',
+        'stroke-width': 10,
+        fill: 'none',
+        'pointer-events': 'stroke',
+      }))
+
+      // 表示用パス（ポインターイベントはヒットエリアに委ねる）
+      eg.appendChild(el('path', {
+        d,
+        class: 'edge-line',
         stroke: STYLE.edgeStroke,
         'stroke-width': STYLE.edgeWidth,
         fill: 'none',
         'marker-end': 'url(#arr)',
         'stroke-linejoin': 'round',
+        'pointer-events': 'none',
       }))
+
+      edgeGroup.appendChild(eg)
     }
   }
 

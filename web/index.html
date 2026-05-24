@@ -141,6 +141,22 @@
       filter: drop-shadow(0 0 4px rgba(51,153,255,0.45));
     }
 
+    /* ── エッジ インタラクション ─────────────────────────── */
+    #diagram-wrap .edge { cursor: pointer; }
+
+    /* ホバー */
+    #diagram-wrap .edge:not(.selected):hover .edge-line {
+      stroke: #3399ff;
+      stroke-width: 2.5px;
+    }
+
+    /* 選択状態 */
+    #diagram-wrap .edge.selected .edge-line {
+      stroke: #ff8800;
+      stroke-width: 2.5px;
+      filter: drop-shadow(0 0 5px rgba(255,136,0,0.55));
+    }
+
     #status {
       font-size: 12px;
       color: #aaa;
