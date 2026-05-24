@@ -2,5 +2,6 @@
 members = [
     "crates/sv-checker",
     "crates/sv-ast-lower",
+    "crates/sv-wasm",
 ]
 resolver = "2"

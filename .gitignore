@@ -5,6 +5,11 @@ Cargo.lock
 # Claude Code
 .claude/
 
+# Web フロントエンド
+web/node_modules/
+web/dist/
+web/wasm/
+
 # エディタ・IDE
 .vscode/
 .idea/
