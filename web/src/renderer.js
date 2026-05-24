@@ -21,12 +21,16 @@ const STYLE = {
   portSize:        8,
   edgeStroke:      '#5566cc',
   edgeWidth:       1.5,
-  labelFont:       'monospace',
+  // エディタと同じプログラミングフォント。リガチャは style 属性で無効化する。
+  labelFont:       "'Cascadia Code', 'Fira Code', 'Consolas', monospace",
   labelSize:       12,
-  subLabelSize:    10,
+  subLabelSize:    11,
   padding:         24,
   jumpRadius:      5,           // ジャンプオーバー半円の半径 (px)
 }
+
+// リガチャ無効化スタイル（SVG text 要素に共通適用）
+const NO_LIGATURES = "font-variant-ligatures: none; font-feature-settings: 'liga' 0, 'calt' 0;"
 
 function el(tag, attrs = {}, children = []) {
   const e = document.createElementNS(NS, tag)
@@ -35,8 +39,16 @@ function el(tag, attrs = {}, children = []) {
   return e
 }
 function text(str, x, y, { size = STYLE.labelSize, anchor = 'middle', fill = '#1d1d1f', bold = false } = {}) {
-  const t = el('text', { x, y, 'text-anchor': anchor, 'font-family': STYLE.labelFont,
-    'font-size': size, fill, 'font-weight': bold ? '600' : '400' })
+  const t = el('text', {
+    x, y,
+    'text-anchor':  anchor,
+    'font-family':  STYLE.labelFont,
+    'font-size':    size,
+    fill,
+    'font-weight':  bold ? '600' : '400',
+    'letter-spacing': '0.3',
+    style:          NO_LIGATURES,
+  })
   t.textContent = str
   return t
 }
