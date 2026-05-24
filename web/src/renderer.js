@@ -25,6 +25,7 @@ const STYLE = {
   labelSize:       12,
   subLabelSize:    10,
   padding:         24,
+  jumpRadius:      5,           // ジャンプオーバー半円の半径 (px)
 }
 
 function el(tag, attrs = {}, children = []) {
@@ -38,6 +39,102 @@ function text(str, x, y, { size = STYLE.labelSize, anchor = 'middle', fill = '#1
     'font-size': size, fill, 'font-weight': bold ? '600' : '400' })
   t.textContent = str
   return t
+}
+
+// ─── ジャンプオーバー ─────────────────────────────────────────────
+
+/**
+ * 全エッジから直線セグメントを収集する。
+ * @returns {{ x1,y1,x2,y2, ei,si,pi, isH }[]}
+ */
+function collectAllSegments(edges) {
+  const segs = []
+  edges.forEach((edge, ei) => {
+    ;(edge.sections ?? []).forEach((sec, si) => {
+      const pts = [sec.startPoint, ...(sec.bendPoints ?? []), sec.endPoint]
+      for (let pi = 0; pi < pts.length - 1; pi++) {
+        const p1 = pts[pi], p2 = pts[pi + 1]
+        const isH = Math.abs(p1.y - p2.y) < 0.5
+        const isV = Math.abs(p1.x - p2.x) < 0.5
+        if (isH || isV) {
+          segs.push({ x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y, ei, si, pi, isH })
+        }
+      }
+    })
+  })
+  return segs
+}
+
+/**
+ * 水平セグメントが異なるエッジの垂直セグメントと交差する X 座標を求める。
+ *
+ * 端点共有（接続点）は EPS でガード、近接交差は半円が重なるため除去する。
+ *
+ * @returns {Map<string, number[]>}  key = "ei-si-pi"、値は昇順ソート済み
+ */
+function buildCrossingMap(segs) {
+  const map   = new Map()
+  const hSegs = segs.filter(s =>  s.isH)
+  const vSegs = segs.filter(s => !s.isH)
+  const EPS   = 1.5
+  const R     = STYLE.jumpRadius
+
+  for (const h of hSegs) {
+    const hMinX = Math.min(h.x1, h.x2)
+    const hMaxX = Math.max(h.x1, h.x2)
+    const hy    = h.y1   // 水平なので y1 == y2
+    const xs    = []
+
+    for (const v of vSegs) {
+      if (h.ei === v.ei) continue           // 同一エッジ内は接続点として扱う
+      const vx    = v.x1                    // 垂直なので x1 == x2
+      const vMinY = Math.min(v.y1, v.y2)
+      const vMaxY = Math.max(v.y1, v.y2)
+      if (vx > hMinX + EPS && vx < hMaxX - EPS &&
+          hy > vMinY + EPS && hy < vMaxY - EPS) {
+        xs.push(vx)
+      }
+    }
+    if (xs.length === 0) continue
+
+    xs.sort((a, b) => a - b)
+
+    // 半円が重なる近接クロッシングを除去
+    const deduped = [xs[0]]
+    for (let i = 1; i < xs.length; i++) {
+      if (xs[i] - deduped[deduped.length - 1] > R * 2 + 1) deduped.push(xs[i])
+    }
+    map.set(`${h.ei}-${h.si}-${h.pi}`, deduped)
+  }
+  return map
+}
+
+/**
+ * 水平セグメントのパス文字列を生成する（交差点に上向き半円アークを挿入）。
+ * 先頭の M コマンドは呼び出し元が出力済みであること。
+ *
+ * @param {number}   x1       - セグメント開始 X
+ * @param {number}   y1       - セグメント Y（水平なので始点・終点共通）
+ * @param {number}   x2       - セグメント終了 X
+ * @param {number[]|undefined} crossXs - 交差 X 座標の昇順配列
+ */
+function buildHSegPath(x1, y1, x2, crossXs) {
+  if (!crossXs || crossXs.length === 0) return `L${x2},${y1}`
+
+  const R      = STYLE.jumpRadius
+  const dir    = x2 >= x1 ? 1 : -1
+  // 進行方向に合わせて交差点を並び替える
+  const sorted = dir > 0 ? crossXs : [...crossXs].reverse()
+  const parts  = []
+
+  for (const cx of sorted) {
+    // 半円手前まで直線
+    parts.push(`L${cx - dir * R},${y1}`)
+    // 上向き半円: sweep=0 (counterclockwise) → SVG y 下向き座標系で上方向
+    parts.push(`A${R},${R} 0 0 0 ${cx + dir * R},${y1}`)
+  }
+  parts.push(`L${x2},${y1}`)
+  return parts.join(' ')
 }
 
 /**
@@ -73,12 +170,31 @@ export function renderToSvg(layout) {
     transform: `translate(${pad},${pad})`,
   })
 
+  // ─── クロッシング検出 ─────────────────────────────────────────
+  const allSegs     = collectAllSegments(layout.edges ?? [])
+  const crossingMap = buildCrossingMap(allSegs)
+
   // ─── エッジ（ノードの背面に描画）────────────────────────────
   const edgeGroup = el('g', { class: 'edges' })
-  for (const edge of layout.edges ?? []) {
-    for (const sec of edge.sections ?? []) {
+
+  for (const [ei, edge] of (layout.edges ?? []).entries()) {
+    for (const [si, sec] of (edge.sections ?? []).entries()) {
       const pts = [sec.startPoint, ...(sec.bendPoints ?? []), sec.endPoint]
-      const d = pts.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x},${p.y}`).join(' ')
+      let d = `M${pts[0].x},${pts[0].y}`
+
+      for (let pi = 0; pi < pts.length - 1; pi++) {
+        const p1  = pts[pi]
+        const p2  = pts[pi + 1]
+        const isH = Math.abs(p1.y - p2.y) < 0.5
+
+        if (isH) {
+          const crossXs = crossingMap.get(`${ei}-${si}-${pi}`)
+          d += ' ' + buildHSegPath(p1.x, p1.y, p2.x, crossXs)
+        } else {
+          d += ` L${p2.x},${p2.y}`
+        }
+      }
+
       edgeGroup.appendChild(el('path', {
         d,
         stroke: STYLE.edgeStroke,
@@ -89,6 +205,7 @@ export function renderToSvg(layout) {
       }))
     }
   }
+
   content.appendChild(edgeGroup)
 
   // ─── ノード ──────────────────────────────────────────────────
