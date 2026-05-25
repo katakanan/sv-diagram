@@ -179,6 +179,43 @@ module pipeline_top #(
     .valid_out (valid_out)
   );
 endmodule
+
+// ================================================================
+// リセットサンプル
+//
+// reset_demo:
+//   q_async : 非同期リセット FF（negedge arst_n が感度リストに含まれる）
+//   q_sync  : 同期リセット FF（clk のみが感度リスト、if 文でリセット処理）
+// ================================================================
+
+module reset_demo (
+  input  var logic clk,
+  input  var logic arst_n,    // 非同期リセット（アクティブロー）
+  input  var logic srst,      // 同期リセット（アクティブハイ）
+  input  var logic d_async,
+  input  var logic d_sync,
+  output var logic q_async,
+  output var logic q_sync
+);
+  // 非同期リセット: negedge arst_n を感度リストに含める
+  always_ff @(posedge clk or negedge arst_n) begin
+    if (!arst_n) begin
+      q_async <= 1'b0;
+    end else begin
+      q_async <= d_async;
+    end
+  end
+
+  // 同期リセット: 感度リストは posedge clk のみ
+  //              リセット条件は always_ff 内の if 文で処理
+  always_ff @(posedge clk) begin
+    if (srst) begin
+      q_sync <= 1'b0;
+    end else begin
+      q_sync <= d_sync;
+    end
+  end
+endmodule
 `
 
 // ─── DOM refs ───────────────────────────────────────────────────
