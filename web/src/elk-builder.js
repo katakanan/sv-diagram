@@ -237,7 +237,7 @@ export function buildElkGraph(tree, moduleIdx = 0) {
     const isOutput = port.direction === 'Output'
     children.push({
       id: nid,
-      width: 52, height: 24,
+      width: Math.max(40, port.name.length * LABEL_CHAR_W + 16), height: 24,
       labels: [{ text: port.name }],
       layoutOptions: {
         'portConstraints': 'FIXED_SIDE',
