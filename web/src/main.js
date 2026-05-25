@@ -187,6 +187,9 @@ const renderBtn    = document.getElementById('render-btn')
 const backBtn      = document.getElementById('back-btn')
 const moduleSelect = document.getElementById('module-select')
 const diagramWrap  = document.getElementById('diagram-wrap')
+const propsKindEl  = document.getElementById('props-kind')
+const propsIdEl    = document.getElementById('props-id')
+const propsBodyEl  = document.getElementById('props-body')
 
 // ─── CodeMirror エディタ初期化 ────────────────────────────────────
 const editor = new EditorView({
@@ -240,6 +243,129 @@ function buildPortEdgeMap(layout) {
   return map
 }
 
+// ─── プロパティパネル ─────────────────────────────────────────────
+
+function esc(s) {
+  return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+/** プロパティパネルを更新する */
+function renderProps(kind, id, rows) {
+  propsKindEl.textContent = kind
+  propsIdEl.textContent   = id ? `— ${id}` : ''
+  if (!rows || rows.length === 0) {
+    propsBodyEl.innerHTML = '<span class="props-empty">ノードまたはエッジを選択してください</span>'
+    return
+  }
+  propsBodyEl.innerHTML = rows.map(([k, v]) =>
+    `<div class="props-row">
+       <span class="props-key">${esc(k)}</span>
+       <span class="props-val">${esc(v)}</span>
+     </div>`
+  ).join('')
+}
+
+/** ノード ID からプロパティ行を返す */
+function getNodeProps(nodeId) {
+  const mod = currentTree?.modules[currentModuleIdx]
+
+  // ─ 外部ポート ─────────────────────────────────────────────────
+  if (nodeId.startsWith('ext.')) {
+    const portName = nodeId.slice(4)
+    const port = mod?.ports.find(p => p.name === portName)
+    if (!port) return { kind: 'Port', rows: [['id', nodeId]] }
+    return {
+      kind: `Port (${port.direction})`,
+      rows: [
+        ['name',      port.name],
+        ['direction', port.direction],
+        ['type',      port.data_type],
+      ],
+    }
+  }
+
+  // ─ モジュールインスタンス ──────────────────────────────────────
+  if (nodeId.startsWith('inst.')) {
+    const instName = nodeId.slice(5)
+    const inst = mod?.instances.find(i => i.instance_name === instName)
+    if (!inst) return { kind: 'Instance', rows: [['id', nodeId]] }
+    const rows = [
+      ['instance', inst.instance_name],
+      ['module',   inst.module_name],
+    ]
+    for (const p of inst.param_overrides) {
+      rows.push([`#${p.param_name}`, p.value])
+    }
+    for (const c of inst.port_connections) {
+      rows.push([`.${c.port_name}`, c.signal || '(unconnected)'])
+    }
+    return { kind: 'Instance', rows }
+  }
+
+  // ─ always ブロック ────────────────────────────────────────────
+  if (nodeId.startsWith('always.')) {
+    const idx = parseInt(nodeId.slice(7))
+    const ab  = mod?.always_blocks[idx]
+    if (!ab) return { kind: 'Always', rows: [['id', nodeId]] }
+    const rows = [['kind', ab.kind]]
+    if (ab.clock) {
+      rows.push(['clock', `${ab.clock.edge === 'Posedge' ? '↑' : '↓'} ${ab.clock.signal_name}`])
+    }
+    if (ab.reset) {
+      rows.push(['reset', `${ab.reset.signal_name} (active-${ab.reset.active_low ? 'low' : 'high'})`])
+    }
+    if (ab.driven_signals.length > 0) {
+      rows.push(['drives', ab.driven_signals.join(', ')])
+    }
+    return { kind: `Always ${ab.kind}`, rows }
+  }
+
+  // ─ assign / MUX ──────────────────────────────────────────────
+  if (nodeId.startsWith('assign.')) {
+    const parts    = nodeId.split('.')
+    const assignIdx = parseInt(parts[1])
+    const assign   = mod?.assigns[assignIdx]
+    if (parts.length >= 3 && parts[2].startsWith('m')) {
+      // MUX ノード
+      return {
+        kind: 'MUX',
+        rows: assign
+          ? [['assign', `${assign.lhs} = ${assign.rhs}`], ['mux', parts[2]]]
+          : [['id', nodeId]],
+      }
+    }
+    if (!assign) return { kind: 'Assign', rows: [['id', nodeId]] }
+    return {
+      kind: 'Assign',
+      rows: [
+        ['lhs', assign.lhs],
+        ['rhs', assign.rhs],
+      ],
+    }
+  }
+
+  // ─ 定数ノード ────────────────────────────────────────────────
+  if (nodeId.startsWith('const.')) {
+    const node = currentLayout?.children?.find(c => c.id === nodeId)
+    return {
+      kind: 'Constant',
+      rows: [['value', node?.labels?.[0]?.text ?? nodeId.slice(6)]],
+    }
+  }
+
+  return { kind: 'Node', rows: [['id', nodeId]] }
+}
+
+/** エッジ ID からプロパティ行を返す */
+function getEdgeProps(edgeId) {
+  const edge = currentLayout?.edges?.find(e => e.id === edgeId)
+  if (!edge) return { kind: 'Edge', rows: [['id', edgeId]] }
+  const rows = []
+  if (edge.sources?.length)  rows.push(['from', edge.sources.join(', ')])
+  if (edge.targets?.length)  rows.push(['to',   edge.targets.join(', ')])
+  return { kind: 'Edge', rows }
+}
+
 function updateBackBtn() {
   if (navStack.length === 0) {
     backBtn.disabled    = true
@@ -262,10 +388,17 @@ function selectNode(nodeId) {
   selectedNodeId = nodeId ?? null
   selectedEdgeId = null
 
-  if (!selectedNodeId) return
+  if (!selectedNodeId) {
+    renderProps('Properties', '', [])
+    return
+  }
 
   // ノードをハイライト
   diagramWrap.querySelector(`.node[data-id="${selectedNodeId}"]`)?.classList.add('selected')
+
+  // プロパティパネル更新
+  const { kind, rows } = getNodeProps(selectedNodeId)
+  renderProps(kind, selectedNodeId, rows)
 
   // ext.* / const.* ノードなら接続エッジも全てハイライト
   const isExt   = selectedNodeId.startsWith('ext.')
@@ -287,6 +420,10 @@ function selectEdge(edgeId) {
   selectedEdgeId = edgeId ?? null
   if (selectedEdgeId) {
     diagramWrap.querySelector(`.edge[data-id="${selectedEdgeId}"]`)?.classList.add('selected')
+    const { kind, rows } = getEdgeProps(selectedEdgeId)
+    renderProps(kind, selectedEdgeId, rows)
+  } else {
+    renderProps('Properties', '', [])
   }
 }
 
