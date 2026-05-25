@@ -15,6 +15,36 @@
 
 /** @typedef {{ nodeId: string, portId: string }} Endpoint */
 
+// ─── ノード幅の動的計算 ──────────────────────────────────────────
+// ポートラベル: font-size 10 + letter-spacing 0.3 のモノスペースで約 7px/char
+// ポートドット(8px) + 内側余白 を合わせた左右各側の固定オフセット
+const LABEL_CHAR_W = 7
+const PORT_INNER   = 36   // 左右各 18px = ポートドット8 + ギャップ4 + 内側余白6
+
+/**
+ * WEST/EAST ポートのラベル幅からノードの最小幅を計算する。
+ * ポートラベルがノード中央のテキストと重ならない幅を保証する。
+ *
+ * @param {object[]} ports      - ELK ポート定義配列
+ * @param {object[]} nodeLabels - ノード自身のラベル配列（中央テキスト幅の推定に使用）
+ * @param {number}   centerMin  - 中央部分の最小幅
+ */
+function calcNodeWidth(ports, nodeLabels = [], centerMin = 50) {
+  let westMax = 0, eastMax = 0
+  for (const p of ports) {
+    const side  = p.layoutOptions?.['port.side'] ?? 'WEST'
+    const chars = p.labels?.[0]?.text?.length ?? 0
+    if (side === 'WEST')      westMax = Math.max(westMax, chars)
+    else if (side === 'EAST') eastMax = Math.max(eastMax, chars)
+  }
+  // ノード名(bold 12px ≈ 8px/char)・サブラベル(11px ≈ 7px/char) から中央幅を推定
+  const namePx   = (nodeLabels[0]?.text?.length ?? 0) * 8
+  const subPx    = (nodeLabels[1]?.text?.length ?? 0) * 7
+  const centerPx = Math.max(centerMin, namePx + 16, subPx + 16)
+
+  return westMax * LABEL_CHAR_W + centerPx + eastMax * LABEL_CHAR_W + PORT_INNER
+}
+
 const SV_KEYWORDS = new Set([
   'begin','end','if','else','case','casez','casex','endcase','default',
   'for','while','repeat','forever',
@@ -244,17 +274,15 @@ export function buildElkGraph(tree, moduleIdx = 0) {
       tap(conn.signal, nid, pid, isIn ? 'sink' : 'source')
     }
 
-    const paramStr = inst.param_overrides.map(p => `${p.param_name}=${p.value}`).join(', ')
-    const sublabel = paramStr ? `#(${paramStr})` : `«${inst.module_name}»`
+    const paramStr  = inst.param_overrides.map(p => `${p.param_name}=${p.value}`).join(', ')
+    const sublabel  = paramStr ? `#(${paramStr})` : `«${inst.module_name}»`
+    const nodeLabels = [{ text: inst.instance_name }, { text: sublabel }]
 
     children.push({
       id: nid,
-      width: 110,
+      width:  calcNodeWidth(ports, nodeLabels, 60),
       height: Math.max(60, ports.length * 20 + 24),
-      labels: [
-        { text: inst.instance_name },
-        { text: sublabel },
-      ],
+      labels: nodeLabels,
       ports,
       layoutOptions: {
         'portConstraints': 'FIXED_SIDE',
@@ -334,12 +362,13 @@ export function buildElkGraph(tree, moduleIdx = 0) {
       }
     }
 
-    const kindLabel = isFf ? 'FF' : always.kind === 'Comb' ? 'COMB' : 'LATCH'
+    const kindLabel  = isFf ? 'FF' : always.kind === 'Comb' ? 'COMB' : 'LATCH'
+    const kindLabels = [{ text: kindLabel }]
     children.push({
       id: nid,
-      width: 80,
+      width:  calcNodeWidth(ports, kindLabels, 44),
       height: Math.max(60, ports.length * 20 + 24),
-      labels: [{ text: kindLabel }],
+      labels: kindLabels,
       ports,
       layoutOptions: {
         'portConstraints': 'FIXED_SIDE',
@@ -374,7 +403,7 @@ export function buildElkGraph(tree, moduleIdx = 0) {
       }
       children.push({
         id: nid,
-        width: 20,
+        width:  calcNodeWidth(ports, [], 12),
         height: Math.max(20, rhsIdents.length * 12 + 8),
         labels: [],
         ports,
