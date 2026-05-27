@@ -238,6 +238,24 @@ endmodule
     assert_eq!(m.ports[2].direction, PortDirection::Output);
 }
 
+/// always_ff の body AST が生成されるか
+#[test]
+fn test_always_ff_body_ast() {
+    let tree = lower(COUNTER_SV, "counter.sv").unwrap();
+    let m = &tree.modules[0];
+    let ab = &m.always_blocks[0];
+
+    // body は空でない
+    assert!(!ab.body.is_empty(), "always_ff body should not be empty");
+
+    // トップレベルに Stmt::If があるはず (if (!rst_n) begin...end else begin...end)
+    let has_if = ab.body.iter().any(|s| matches!(s, Stmt::If { .. }));
+    assert!(has_if, "expected Stmt::If in body, got: {:?}", ab.body);
+
+    // driven_signals に count が含まれる
+    assert!(ab.driven_signals.contains(&"count".to_string()));
+}
+
 /// ビット演算を含む assign
 #[test]
 fn test_assign_bitwise() {

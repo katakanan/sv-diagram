@@ -293,88 +293,146 @@ export function buildElkGraph(tree, moduleIdx = 0) {
 
   // ─── always_ff / always_comb / always_latch ───────────────────
   mod.always_blocks.forEach((always, i) => {
-    const nid   = `always.${i}`
-    const ports = []
-    const isFf  = always.kind === 'Ff'
+    const isFf = always.kind === 'Ff'
 
     if (isFf) {
-      // RST ポート (WEST)
-      if (always.reset) {
-        const pid   = `${nid}.RST`
-        const label = always.reset.active_low ? 'RST_N' : 'RST'
-        ports.push({
-          id: pid,
-          labels: [{ text: label }],
-          layoutOptions: { 'port.side': 'WEST' },
-        })
-        tap(always.reset.signal_name, nid, pid, 'sink')
-      }
-      // D 入力ポート: read_signals (WEST)
+      // ── ff_comb: 次状態ロジックノード ─────────────────────────
+      // read_signals (clk・rst は always.rs 側で除外済み) を WEST 入力、
+      // driven_signals を EAST 出力として配置。
+      // EAST 出力ポートは wire システムには登録せず、
+      // ff_reg.D へ直結エッジを張る。
+      const combId    = `ff_comb.${i}`
+      const combPorts = []
+
       for (const sig of (always.read_signals ?? [])) {
-        const pid = `${nid}.D.${sig}`
-        ports.push({
+        const pid = `${combId}.in.${sig}`
+        combPorts.push({
           id: pid,
-          labels: [{ text: sig }],
+          labels:        [{ text: sig }],
           layoutOptions: { 'port.side': 'WEST' },
         })
-        tap(sig, nid, pid, 'sink')
+        tap(sig, combId, pid, 'sink')
       }
-      // CLK ポート (SOUTH)
-      if (always.clock) {
-        const pid = `${nid}.CLK`
-        ports.push({
-          id: pid,
-          labels: [{ text: 'CLK' }],
-          layoutOptions: { 'port.side': 'SOUTH' },
-        })
-        tap(always.clock.signal_name, nid, pid, 'sink')
-      }
-      // Q 出力ポート (EAST)
+
       for (const sig of always.driven_signals) {
-        const pid = `${nid}.Q.${sig}`
-        ports.push({
+        const pid = `${combId}.out.${sig}`
+        combPorts.push({
           id: pid,
-          labels: [{ text: sig }],
+          labels:        [{ text: sig }],
           layoutOptions: { 'port.side': 'EAST' },
         })
-        tap(sig, nid, pid, 'source')
+        // wire システム未登録 → 下で ff_reg.D へ直結
       }
+
+      const combLabels = [{ text: 'NEXT' }]
+      children.push({
+        id:     combId,
+        width:  calcNodeWidth(combPorts, combLabels, 44),
+        height: Math.max(40, combPorts.length * 20 + 24),
+        labels: combLabels,
+        ports:  combPorts,
+        layoutOptions: {
+          'portConstraints':             'FIXED_SIDE',
+          'elk.nodeLabels.placement':    'INSIDE V_CENTER H_CENTER',
+        },
+      })
+
+      // ── ff_reg: D フリップフロップ（driven_signal ごとに 1 個）─
+      for (const sig of always.driven_signals) {
+        const regId  = `ff_reg.${i}.${sig}`
+        const dPid   = `${regId}.D`
+        const qPid   = `${regId}.Q`
+        const clkPid = `${regId}.CLK`
+
+        // WEST: D (index 0)、CLK (index 1) の順で上から配置
+        // SOUTH: RST_N（非同期リセット）
+        // EAST: Q
+        const regPorts = [
+          // WEST: 時計回り(下→上)なので index が大きいほど上に配置される
+          // D を上(index:1)、CLK を下(index:0)にする
+          { id: dPid,   labels: [{ text: 'D' }],   layoutOptions: { 'port.side': 'WEST', 'port.index': '1' } },
+          { id: clkPid, labels: [{ text: 'CLK' }], layoutOptions: { 'port.side': 'WEST', 'port.index': '0' } },
+          { id: qPid,   labels: [{ text: 'Q' }],   layoutOptions: { 'port.side': 'EAST', 'port.index': '0' } },
+        ]
+
+        if (always.reset) {
+          const rstPid   = `${regId}.RST`
+          const rstLabel = always.reset.active_low ? 'RST_N' : 'RST'
+          regPorts.push({
+            id: rstPid,
+            labels:        [{ text: rstLabel }],
+            layoutOptions: { 'port.side': 'SOUTH', 'port.index': '0' },
+          })
+          tap(always.reset.signal_name, regId, rstPid, 'sink')
+        }
+
+        if (always.clock) {
+          tap(always.clock.signal_name, regId, clkPid, 'sink')
+        }
+
+        // Q → wire システムにソースとして登録
+        tap(sig, regId, qPid, 'source')
+
+        // ff_comb.out.{sig} → D に直結エッジ
+        edges.push({
+          id:      `e${eid++}`,
+          sources: [`${combId}.out.${sig}`],
+          targets: [dPid],
+        })
+
+        const regLabels = [{ text: sig }, { text: 'DFF' }]
+        children.push({
+          id:     regId,
+          width:  calcNodeWidth(regPorts, regLabels, 40),
+          height: Math.max(64, regPorts.length * 18 + 24),
+          labels: regLabels,
+          ports:  regPorts,
+          layoutOptions: {
+            'portConstraints':          'FIXED_ORDER',
+            'elk.nodeLabels.placement': 'INSIDE V_TOP H_CENTER',
+          },
+        })
+      }
+
     } else {
-      // Comb / Latch: read_signals が入力ポート (WEST)
+      // ── Comb / Latch: 従来どおり1ノード ──────────────────────
+      const nid   = `always.${i}`
+      const ports = []
+
       for (const sig of (always.read_signals ?? [])) {
         const pid = `${nid}.in.${sig}`
         ports.push({
           id: pid,
-          labels: [{ text: sig }],
+          labels:        [{ text: sig }],
           layoutOptions: { 'port.side': 'WEST' },
         })
         tap(sig, nid, pid, 'sink')
       }
-      // driven_signals が出力ポート (EAST)
+
       for (const sig of always.driven_signals) {
         const pid = `${nid}.out.${sig}`
         ports.push({
           id: pid,
-          labels: [{ text: sig }],
+          labels:        [{ text: sig }],
           layoutOptions: { 'port.side': 'EAST' },
         })
         tap(sig, nid, pid, 'source')
       }
-    }
 
-    const kindLabel  = isFf ? 'FF' : always.kind === 'Comb' ? 'COMB' : 'LATCH'
-    const kindLabels = [{ text: kindLabel }]
-    children.push({
-      id: nid,
-      width:  calcNodeWidth(ports, kindLabels, 44),
-      height: Math.max(60, ports.length * 20 + 24),
-      labels: kindLabels,
-      ports,
-      layoutOptions: {
-        'portConstraints': 'FIXED_SIDE',
-        'elk.nodeLabels.placement': 'INSIDE V_CENTER H_CENTER',
-      },
-    })
+      const kindLabel  = always.kind === 'Comb' ? 'COMB' : 'LATCH'
+      const kindLabels = [{ text: kindLabel }]
+      children.push({
+        id:     nid,
+        width:  calcNodeWidth(ports, kindLabels, 44),
+        height: Math.max(60, ports.length * 20 + 24),
+        labels: kindLabels,
+        ports,
+        layoutOptions: {
+          'portConstraints':          'FIXED_SIDE',
+          'elk.nodeLabels.placement': 'INSIDE V_CENTER H_CENTER',
+        },
+      })
+    }
   })
 
   // ─── assign 文ノード ─────────────────────────────────────────

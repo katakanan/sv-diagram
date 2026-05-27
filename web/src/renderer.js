@@ -248,14 +248,20 @@ export function renderToSvg(layout) {
     const nw = node.width  ?? 0
     const nh = node.height ?? 0
 
-    const isExt   = node.id.startsWith('ext.')
-    const isConst = node.id.startsWith('const.')
-    const fill    = isExt   ? STYLE.extFill
-                  : isConst ? STYLE.constFill
-                  :           STYLE.nodeFill
-    const stroke  = isExt   ? STYLE.extStroke
-                  : isConst ? STYLE.constStroke
-                  :           STYLE.nodeStroke
+    const isExt    = node.id.startsWith('ext.')
+    const isConst  = node.id.startsWith('const.')
+    const isFfReg  = node.id.startsWith('ff_reg.')
+    const isFfComb = node.id.startsWith('ff_comb.')
+    const fill    = isExt    ? STYLE.extFill
+                  : isConst  ? STYLE.constFill
+                  : isFfReg  ? '#e8f4e8'   // 薄い緑: DFF レジスタ
+                  : isFfComb ? '#f0f8e8'   // 薄い黄緑: 次状態ロジック
+                  :            STYLE.nodeFill
+    const stroke  = isExt    ? STYLE.extStroke
+                  : isConst  ? STYLE.constStroke
+                  : isFfReg  ? '#3a8a3a'
+                  : isFfComb ? '#6a9a3a'
+                  :            STYLE.nodeStroke
 
     const isInstNode = node.id.startsWith('inst.')
     const g = el('g', {

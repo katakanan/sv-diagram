@@ -339,21 +339,44 @@ function getNodeProps(nodeId) {
     return { kind: 'Instance', rows }
   }
 
-  // ─ always ブロック ────────────────────────────────────────────
+  // ─ FF 次状態ロジックノード ────────────────────────────────────
+  if (nodeId.startsWith('ff_comb.')) {
+    // ff_comb.{i}
+    const idx = parseInt(nodeId.split('.')[1])
+    const ab  = mod?.always_blocks[idx]
+    if (!ab) return { kind: 'FF Next', rows: [['id', nodeId]] }
+    const rows = [['kind', 'Next-state logic (combinational)']]
+    if (ab.driven_signals.length > 0) rows.push(['drives',  ab.driven_signals.join(', ')])
+    if (ab.read_signals?.length > 0)  rows.push(['reads',   ab.read_signals.join(', ')])
+    return { kind: 'FF Next', rows }
+  }
+
+  // ─ FF レジスタノード ──────────────────────────────────────────
+  if (nodeId.startsWith('ff_reg.')) {
+    // ff_reg.{i}.{sig}
+    const parts = nodeId.split('.')
+    const idx   = parseInt(parts[1])
+    const sig   = parts.slice(2).join('.')
+    const ab    = mod?.always_blocks[idx]
+    if (!ab) return { kind: 'DFF', rows: [['id', nodeId]] }
+    const rows = [['signal', sig], ['type', 'D flip-flop']]
+    if (ab.clock) {
+      rows.push(['CLK', `${ab.clock.edge === 'Posedge' ? '↑' : '↓'} ${ab.clock.signal_name}`])
+    }
+    if (ab.reset) {
+      rows.push(['RST', `${ab.reset.signal_name} (active-${ab.reset.active_low ? 'low' : 'high'})`])
+    }
+    return { kind: 'DFF', rows }
+  }
+
+  // ─ always ブロック (comb/latch) ───────────────────────────────
   if (nodeId.startsWith('always.')) {
     const idx = parseInt(nodeId.slice(7))
     const ab  = mod?.always_blocks[idx]
     if (!ab) return { kind: 'Always', rows: [['id', nodeId]] }
     const rows = [['kind', ab.kind]]
-    if (ab.clock) {
-      rows.push(['clock', `${ab.clock.edge === 'Posedge' ? '↑' : '↓'} ${ab.clock.signal_name}`])
-    }
-    if (ab.reset) {
-      rows.push(['reset', `${ab.reset.signal_name} (active-${ab.reset.active_low ? 'low' : 'high'})`])
-    }
-    if (ab.driven_signals.length > 0) {
-      rows.push(['drives', ab.driven_signals.join(', ')])
-    }
+    if (ab.driven_signals.length > 0) rows.push(['drives', ab.driven_signals.join(', ')])
+    if (ab.read_signals?.length > 0)  rows.push(['reads',  ab.read_signals.join(', ')])
     return { kind: `Always ${ab.kind}`, rows }
   }
 
@@ -437,15 +460,31 @@ function selectNode(nodeId) {
   const { kind, rows } = getNodeProps(selectedNodeId)
   renderProps(kind, selectedNodeId, rows)
 
-  // ext.* / const.* ノードなら接続エッジも全てハイライト
-  const isExt   = selectedNodeId.startsWith('ext.')
-  const isConst = selectedNodeId.startsWith('const.')
-  if ((isExt || isConst) && currentLayout) {
-    // ext.*   のポートは .p、const.* のポートは .out
-    const portId  = isExt ? `${selectedNodeId}.p` : `${selectedNodeId}.out`
-    const portMap = buildPortEdgeMap(currentLayout)
-    for (const eid of portMap.get(portId) ?? []) {
-      diagramWrap.querySelector(`.edge[data-id="${eid}"]`)?.classList.add('selected')
+  // 特定ノードは接続エッジも全てハイライト
+  if (currentLayout) {
+    const portMap    = buildPortEdgeMap(currentLayout)
+    let   portIds    = []
+
+    if (selectedNodeId.startsWith('ext.')) {
+      portIds = [`${selectedNodeId}.p`]
+    } else if (selectedNodeId.startsWith('const.')) {
+      portIds = [`${selectedNodeId}.out`]
+    } else if (selectedNodeId.startsWith('ff_comb.')) {
+      // ff_comb の全ポート（WEST 入力 + EAST 出力）のエッジをハイライト
+      portIds = (currentLayout.children ?? [])
+        .find(c => c.id === selectedNodeId)
+        ?.ports?.map(p => p.id) ?? []
+    } else if (selectedNodeId.startsWith('ff_reg.')) {
+      // ff_reg の全ポートのエッジをハイライト
+      portIds = (currentLayout.children ?? [])
+        .find(c => c.id === selectedNodeId)
+        ?.ports?.map(p => p.id) ?? []
+    }
+
+    for (const pid of portIds) {
+      for (const eid of portMap.get(pid) ?? []) {
+        diagramWrap.querySelector(`.edge[data-id="${eid}"]`)?.classList.add('selected')
+      }
     }
   }
 }
