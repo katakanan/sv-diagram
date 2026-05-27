@@ -448,25 +448,48 @@ export function buildElkGraph(tree, moduleIdx = 0) {
       const outerMuxId = outPortId.replace(/\.out$/, '')
       tap(assign.lhs, outerMuxId, outPortId, 'source')
     } else {
-      // 非三項 assign → 小さな assign ノード（RHS 識別子を WEST 入力）
-      const outPid = `${nid}.out`
-      const ports  = [{ id: outPid, layoutOptions: { 'port.side': 'EAST' } }]
-      tap(assign.lhs, nid, outPid, 'source')
-
       const rhsIdents = extractIdents(assign.rhs)
-      for (const sig of rhsIdents) {
-        const inPid = `${nid}.in.${sig}`
-        ports.push({ id: inPid, layoutOptions: { 'port.side': 'WEST' } })
-        tap(sig, nid, inPid, 'sink')
+
+      if (rhsIdents.length === 0) {
+        // 純定数 assign (assign hoge = 1'd0 等):
+        // assign ノードは作らず定数ノードを wire システムにソースとして直接登録する
+        const label = assign.rhs.replace(/\s+/g, ' ').trim()
+        if (label) {
+          const cid    = `const.${cstCount++}`
+          const outPid = `${cid}.out`
+          children.push({
+            id:     cid,
+            width:  Math.max(28, label.length * 7 + 12),
+            height: 20,
+            labels: [{ text: label }],
+            ports:  [{ id: outPid, layoutOptions: { 'port.side': 'EAST' } }],
+            layoutOptions: {
+              'portConstraints': 'FIXED_SIDE',
+              'elk.nodeLabels.placement': 'INSIDE V_CENTER H_CENTER',
+            },
+          })
+          tap(assign.lhs, cid, outPid, 'source')
+        }
+      } else {
+        // 識別子を含む非三項 assign → assign ノード（RHS 識別子を WEST 入力）
+        const outPid = `${nid}.out`
+        const ports  = [{ id: outPid, layoutOptions: { 'port.side': 'EAST' } }]
+        tap(assign.lhs, nid, outPid, 'source')
+
+        for (const sig of rhsIdents) {
+          const inPid = `${nid}.in.${sig}`
+          ports.push({ id: inPid, layoutOptions: { 'port.side': 'WEST' } })
+          tap(sig, nid, inPid, 'sink')
+        }
+        children.push({
+          id: nid,
+          width:  calcNodeWidth(ports, [], 12),
+          height: Math.max(20, rhsIdents.length * 12 + 8),
+          labels: [],
+          ports,
+          layoutOptions: { 'portConstraints': 'FIXED_SIDE' },
+        })
       }
-      children.push({
-        id: nid,
-        width:  calcNodeWidth(ports, [], 12),
-        height: Math.max(20, rhsIdents.length * 12 + 8),
-        labels: [],
-        ports,
-        layoutOptions: { 'portConstraints': 'FIXED_SIDE' },
-      })
     }
   })
 

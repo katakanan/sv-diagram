@@ -216,6 +216,31 @@ module reset_demo (
     end
   end
 endmodule
+
+// ================================================================
+// 定数 assign サンプル
+//
+// const_demo:
+//   assign hoge = 1'd0  のような純定数 assign を定数ノードで表示するデモ
+// ================================================================
+
+module const_demo (
+  output var logic [7:0] zero_out,
+  output var logic [7:0] const_out,
+  output var logic       tie_hi,
+  output var logic       tie_lo,
+  input  var logic [7:0] passthru_in,
+  output var logic [7:0] passthru_out
+);
+  // 純定数 assign: RHS がリテラルのみ → 定数ノードとエッジで表示
+  assign zero_out   = 8'h00;
+  assign const_out  = 8'hAB;
+  assign tie_hi     = 1'b1;
+  assign tie_lo     = 1'b0;
+
+  // 信号 assign: 従来どおり assign ノード
+  assign passthru_out = passthru_in;
+endmodule
 `
 
 // ─── DOM refs ───────────────────────────────────────────────────
