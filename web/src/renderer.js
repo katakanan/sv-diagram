@@ -300,11 +300,25 @@ export function renderToSvg(layout) {
 
       // 定数ノードはポートドットを描かない
       if (!isConst) {
+        // 通常のポートドット（境界上の正方形）は常に描画
         g.appendChild(el('rect', {
           x: px - ps / 2, y: py - ps / 2,
           width: ps, height: ps,
           fill: STYLE.portFill, rx: 1,
         }))
+        // ff_reg の CLK ポート: ノード内側にクロック三角形を追加描画
+        // WEST ポートの px はノード左辺と一致するため、
+        // 底辺を px に置いて先端をノード内部（+x 方向）へ向ける
+        if (isFfReg && port.labels?.[0]?.text === 'CLK') {
+          g.appendChild(el('polygon', {
+            points: [
+              `${px},${py - ps / 2}`,   // 左上（ノード左辺）
+              `${px},${py + ps / 2}`,   // 左下（ノード左辺）
+              `${px + ps},${py}`,       // 右先端（ノード内部）
+            ].join(' '),
+            fill: STYLE.portFill,
+          }))
+        }
       }
 
       // ポートラベル（インスタンスのみ表示）
