@@ -184,6 +184,60 @@ endmodule
     assert!(m.assigns[0].rhs.contains("req"));
 }
 
+/// `var` キーワードなしのポート宣言 (`input logic hoge`)
+#[test]
+fn test_port_without_var() {
+    let sv = r#"
+module t (
+  input  logic       clk,
+  input  logic       rst_n,
+  output logic [7:0] data_out
+);
+endmodule
+"#;
+    let tree = lower(sv, "t.sv").unwrap();
+    let m = &tree.modules[0];
+
+    assert_eq!(m.ports.len(), 3);
+
+    let clk = &m.ports[0];
+    assert_eq!(clk.name, "clk");
+    assert_eq!(clk.direction, PortDirection::Input);
+
+    let rst = &m.ports[1];
+    assert_eq!(rst.name, "rst_n");
+    assert_eq!(rst.direction, PortDirection::Input);
+
+    let dout = &m.ports[2];
+    assert_eq!(dout.name, "data_out");
+    assert_eq!(dout.direction, PortDirection::Output);
+    // ビット幅付き型が取れているか
+    assert!(dout.data_type.contains("logic"), "data_type was: {}", dout.data_type);
+}
+
+/// var あり・なし混在ポート
+#[test]
+fn test_port_mixed_var() {
+    let sv = r#"
+module t (
+  input  var logic clk,
+  input      logic rst_n,
+  output var logic y
+);
+endmodule
+"#;
+    let tree = lower(sv, "t.sv").unwrap();
+    let m = &tree.modules[0];
+
+    assert_eq!(m.ports.len(), 3);
+    assert_eq!(m.ports[0].name, "clk");
+    assert_eq!(m.ports[0].direction, PortDirection::Input);
+    assert_eq!(m.ports[1].name, "rst_n");
+    assert_eq!(m.ports[1].direction, PortDirection::Input);
+    assert_eq!(m.ports[2].name, "y");
+    assert_eq!(m.ports[2].direction, PortDirection::Output);
+}
+
 /// ビット演算を含む assign
 #[test]
 fn test_assign_bitwise() {
