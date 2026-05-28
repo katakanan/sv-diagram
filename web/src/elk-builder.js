@@ -66,6 +66,159 @@ function extractIdents(expr) {
   return [...new Set(matches)].filter(w => !SV_KEYWORDS.has(w))
 }
 
+// ─── body AST ヘルパー ────────────────────────────────────────────
+
+/**
+ * Expr AST (serde tag="t" content="v") から識別子名を再帰的に収集する。
+ * Raw 文字列は extractIdents にフォールバックする。
+ */
+function collectExprIdents(expr) {
+  if (!expr) return []
+  switch (expr.t) {
+    case 'Ident':   return [expr.v]
+    case 'Lit':     return []
+    case 'Raw':     return extractIdents(expr.v)
+    case 'Unary':   return collectExprIdents(expr.v.operand)
+    case 'Binary':  return [...collectExprIdents(expr.v.lhs), ...collectExprIdents(expr.v.rhs)]
+    case 'Ternary': return [
+      ...collectExprIdents(expr.v.c),
+      ...collectExprIdents(expr.v.t),   // "t" は true 分岐 (外側のタグキーと同名だが別物)
+      ...collectExprIdents(expr.v.e),
+    ]
+    case 'Index':   return [...collectExprIdents(expr.v.base), ...collectExprIdents(expr.v.idx)]
+    case 'Slice':   return [
+      ...collectExprIdents(expr.v.base),
+      ...collectExprIdents(expr.v.hi),
+      ...collectExprIdents(expr.v.lo),
+    ]
+    case 'Concat':  return expr.v.flatMap(e => collectExprIdents(e))
+    default:        return []
+  }
+}
+
+/** Expr を表示用の文字列に変換する（定数ノードのラベル用）。 */
+function exprToString(expr) {
+  if (!expr) return ''
+  if (expr.t === 'Ident' || expr.t === 'Lit' || expr.t === 'Raw') return String(expr.v)
+  return ''
+}
+
+/**
+ * always 本体の Stmt 配列を解析し、driven_signal ごとの依存信号セットを返す。
+ *
+ * - 代入文: RHS 識別子 → LHS の依存集合に追加
+ * - if/case 条件: そのブロック内で書かれる全 driven_signal に条件識別子を追加（外側から伝搬）
+ */
+function extractDepsPerSignal(body, drivenSignals) {
+  const deps = new Map(drivenSignals.map(s => [s, new Set()]))
+
+  function getDriven(stmts) {
+    const driven = new Set()
+    for (const stmt of stmts) {
+      if (stmt.t === 'NbAssign' || stmt.t === 'BAssign') { driven.add(stmt.v.lhs) }
+      else if (stmt.t === 'If') {
+        for (const s of getDriven(stmt.v.then_)) driven.add(s)
+        for (const s of getDriven(stmt.v.else_)) driven.add(s)
+      } else if (stmt.t === 'Case') {
+        for (const item of stmt.v.items)           for (const s of getDriven(item.stmts)) driven.add(s)
+        for (const s of getDriven(stmt.v.default_)) driven.add(s)
+      }
+    }
+    return driven
+  }
+
+  function walk(stmts, condCtx) {
+    for (const stmt of stmts) {
+      if (stmt.t === 'NbAssign' || stmt.t === 'BAssign') {
+        if (deps.has(stmt.v.lhs)) {
+          for (const id of collectExprIdents(stmt.v.rhs)) deps.get(stmt.v.lhs).add(id)
+          for (const id of condCtx)                        deps.get(stmt.v.lhs).add(id)
+        }
+      } else if (stmt.t === 'If') {
+        const condIds      = collectExprIdents(stmt.v.cond)
+        const branchDriven = getDriven([...stmt.v.then_, ...stmt.v.else_])
+        for (const sig of branchDriven) {
+          if (deps.has(sig)) {
+            for (const id of condIds) deps.get(sig).add(id)
+            for (const id of condCtx) deps.get(sig).add(id)
+          }
+        }
+        walk(stmt.v.then_, [...condCtx, ...condIds])
+        walk(stmt.v.else_, [...condCtx, ...condIds])
+      } else if (stmt.t === 'Case') {
+        const selIds     = collectExprIdents(stmt.v.sel)
+        const allDriven  = getDriven([...stmt.v.items.flatMap(i => i.stmts), ...stmt.v.default_])
+        for (const sig of allDriven) {
+          if (deps.has(sig)) {
+            for (const id of selIds)  deps.get(sig).add(id)
+            for (const id of condCtx) deps.get(sig).add(id)
+          }
+        }
+        for (const item of stmt.v.items) walk(item.stmts, [...condCtx, ...selIds])
+        walk(stmt.v.default_, [...condCtx, ...selIds])
+      }
+    }
+  }
+
+  walk(body ?? [], [])
+  for (const [, set] of deps) {
+    for (const id of [...set]) { if (SV_KEYWORDS.has(id)) set.delete(id) }
+  }
+  return deps
+}
+
+/**
+ * async reset のトップレベル if 分岐を除去して else-branch のみを返す。
+ *
+ * always_ff @(posedge clk or negedge rst_n) begin
+ *   if (!rst_n) q <= '0;   ← ここを除去（DFF の RST ポートが担う）
+ *   else        q <= d;    ← これだけ返す（組み合わせ NEXT ロジック）
+ * end
+ */
+function stripAsyncResetBranch(body, resetName) {
+  if (!resetName || !body || body.length === 0) return body
+  for (const stmt of body) {
+    if (stmt.t !== 'If') continue
+    if (collectExprIdents(stmt.v.cond).includes(resetName)) {
+      return stmt.v.else_   // else-branch のみ（通常動作パス）
+    }
+  }
+  return body
+}
+
+/**
+ * 同期リセットパターンを検出する。
+ *
+ * 以下の形を認識:
+ *   if (<single_ident>)  sig <= <constant>   ← sync reset
+ *   else                 sig <= <data>        ← 通常動作
+ *
+ * @returns {{ sel: string, thenRhs: Expr, elseBody: Stmt[] } | null}
+ */
+function detectSyncReset(body, sig) {
+  if (!body || body.length === 0) return null
+  for (const stmt of body) {
+    if (stmt.t !== 'If') continue
+    const condIdents = collectExprIdents(stmt.v.cond)
+    if (condIdents.length !== 1) continue
+    const sel = condIdents[0]
+
+    // then-branch に sig への代入があり RHS が定数か確認
+    let thenRhs = null
+    for (const s of stmt.v.then_) {
+      if ((s.t === 'NbAssign' || s.t === 'BAssign') && s.v.lhs === sig) {
+        thenRhs = s.v.rhs
+        break
+      }
+    }
+    if (!thenRhs) continue
+    if (collectExprIdents(thenRhs).length > 0) continue   // 定数でなければスキップ
+
+    return { sel, thenRhs, elseBody: stmt.v.else_ }
+  }
+  return null
+}
+
 /**
  * SV 式文字列を三項演算子で再帰的に分解する。
  *
@@ -296,60 +449,98 @@ export function buildElkGraph(tree, moduleIdx = 0) {
     const isFf = always.kind === 'Ff'
 
     if (isFf) {
-      // ── ff_comb: 次状態ロジックノード ─────────────────────────
-      // read_signals (clk・rst は always.rs 側で除外済み) を WEST 入力、
-      // driven_signals を EAST 出力として配置。
-      // EAST 出力ポートは wire システムには登録せず、
-      // ff_reg.D へ直結エッジを張る。
-      const combId    = `ff_comb.${i}`
-      const combPorts = []
+      // async reset 分岐を除去した body（else-branch = 通常動作パスのみ）
+      // 例: if (!rst_n) q<=0; else q<=d; → [q<=d] を返す
+      // async reset の処理は DFF の RST ポートが担うため NEXT ロジックには不要
+      const asyncRstName = always.reset?.signal_name ?? null
+      const filteredBody = stripAsyncResetBranch(always.body ?? [], asyncRstName)
 
-      for (const sig of (always.read_signals ?? [])) {
-        const pid = `${combId}.in.${sig}`
-        combPorts.push({
-          id: pid,
-          labels:        [{ text: sig }],
-          layoutOptions: { 'port.side': 'WEST' },
-        })
-        tap(sig, combId, pid, 'sink')
-      }
-
-      for (const sig of always.driven_signals) {
-        const pid = `${combId}.out.${sig}`
-        combPorts.push({
-          id: pid,
-          labels:        [{ text: sig }],
-          layoutOptions: { 'port.side': 'EAST' },
-        })
-        // wire システム未登録 → 下で ff_reg.D へ直結
-      }
-
-      const combLabels = [{ text: 'NEXT' }]
-      children.push({
-        id:     combId,
-        width:  calcNodeWidth(combPorts, combLabels, 44),
-        height: Math.max(40, combPorts.length * 20 + 24),
-        labels: combLabels,
-        ports:  combPorts,
-        layoutOptions: {
-          'portConstraints':             'FIXED_SIDE',
-          'elk.nodeLabels.placement':    'INSIDE V_CENTER H_CENTER',
-        },
-      })
-
-      // ── ff_reg: D フリップフロップ（driven_signal ごとに 1 個）─
+      // driven_signal ごとに (NEXT or MUX) + DFF のペアを生成
       for (const sig of always.driven_signals) {
         const regId  = `ff_reg.${i}.${sig}`
         const dPid   = `${regId}.D`
         const qPid   = `${regId}.Q`
         const clkPid = `${regId}.CLK`
 
-        // WEST: D (index 0)、CLK (index 1) の順で上から配置
-        // SOUTH: RST_N（非同期リセット）
-        // EAST: Q
+        // sync reset パターンを検出（async reset がある場合は不適用）
+        const syncRst = !always.reset ? detectSyncReset(filteredBody, sig) : null
+
+        if (syncRst) {
+          // ── sync reset: srst を SEL とする MUX ノード ────────
+          // srst=1 → リセット値(定数)   srst=0 → 通常データ
+          const muxId  = `ff_comb.${i}.${sig}`
+          const selPid = `${muxId}.sel`
+          const in1Pid = `${muxId}.in1`   // SEL=1 パス: リセット値
+          const in0Pid = `${muxId}.in0`   // SEL=0 パス: 通常データ
+          const outPid = `${muxId}.out`
+
+          // SEL: srst 信号
+          tap(syncRst.sel, muxId, selPid, 'sink')
+
+          // in1: リセット値を定数ノードとして接続
+          makeConst(exprToString(syncRst.thenRhs) || "'0", in1Pid)
+
+          // in0: else-branch (通常動作) の依存信号
+          const elseDeps = extractDepsPerSignal(syncRst.elseBody, [sig]).get(sig) ?? new Set()
+          for (const inSig of elseDeps) {
+            tap(inSig, muxId, in0Pid, 'sink')
+          }
+
+          children.push({
+            id:     muxId,
+            width:  60,
+            height: 68,
+            labels: [{ text: 'MUX' }, { text: sig }],
+            ports: [
+              { id: in1Pid, labels: [{ text: '1' }], layoutOptions: { 'port.side': 'WEST' } },
+              { id: in0Pid, labels: [{ text: '0' }], layoutOptions: { 'port.side': 'WEST' } },
+              { id: selPid, labels: [{ text: 'S' }],  layoutOptions: { 'port.side': 'SOUTH' } },
+              { id: outPid, labels: [{ text: sig }],   layoutOptions: { 'port.side': 'EAST' } },
+            ],
+            layoutOptions: {
+              'portConstraints':          'FIXED_SIDE',
+              'elk.nodeLabels.placement': 'INSIDE V_TOP H_CENTER',
+            },
+          })
+
+          edges.push({ id: `e${eid++}`, sources: [outPid], targets: [dPid] })
+
+        } else {
+          // ── async reset 除去済み body から deps を計算 → NEXT ノード ─
+          const combId     = `ff_comb.${i}.${sig}`
+          const combOutPid = `${combId}.out`
+          const combPorts  = []
+
+          const deps = extractDepsPerSignal(filteredBody, [sig]).get(sig) ?? new Set()
+          for (const inSig of deps) {
+            const pid = `${combId}.in.${inSig}`
+            combPorts.push({
+              id:            pid,
+              labels:        [{ text: inSig }],
+              layoutOptions: { 'port.side': 'WEST' },
+            })
+            tap(inSig, combId, pid, 'sink')
+          }
+          combPorts.push({ id: combOutPid, labels: [{ text: sig }], layoutOptions: { 'port.side': 'EAST' } })
+
+          const combLabels = [{ text: sig }, { text: 'NEXT' }]
+          children.push({
+            id:     combId,
+            width:  calcNodeWidth(combPorts, combLabels, 44),
+            height: Math.max(40, combPorts.length * 20 + 24),
+            labels: combLabels,
+            ports:  combPorts,
+            layoutOptions: {
+              'portConstraints':          'FIXED_SIDE',
+              'elk.nodeLabels.placement': 'INSIDE V_TOP H_CENTER',
+            },
+          })
+
+          edges.push({ id: `e${eid++}`, sources: [combOutPid], targets: [dPid] })
+        }
+
+        // ─ DFF ────────────────────────────────────────────────
         const regPorts = [
-          // WEST: 時計回り(下→上)なので index が大きいほど上に配置される
-          // D を上(index:1)、CLK を下(index:0)にする
           { id: dPid,   labels: [{ text: 'D' }],   layoutOptions: { 'port.side': 'WEST', 'port.index': '1' } },
           { id: clkPid, labels: [{ text: 'CLK' }], layoutOptions: { 'port.side': 'WEST', 'port.index': '0' },
             ...(always.clock?.edge === 'Negedge' ? { negedge: true } : {}) },
@@ -360,7 +551,7 @@ export function buildElkGraph(tree, moduleIdx = 0) {
           const rstPid   = `${regId}.RST`
           const rstLabel = always.reset.active_low ? 'RST_N' : 'RST'
           regPorts.push({
-            id: rstPid,
+            id:            rstPid,
             labels:        [{ text: rstLabel }],
             layoutOptions: { 'port.side': 'SOUTH', 'port.index': '0' },
             ...(always.reset.active_low ? { active_low: true } : {}),
@@ -372,15 +563,7 @@ export function buildElkGraph(tree, moduleIdx = 0) {
           tap(always.clock.signal_name, regId, clkPid, 'sink')
         }
 
-        // Q → wire システムにソースとして登録
         tap(sig, regId, qPid, 'source')
-
-        // ff_comb.out.{sig} → D に直結エッジ
-        edges.push({
-          id:      `e${eid++}`,
-          sources: [`${combId}.out.${sig}`],
-          targets: [dPid],
-        })
 
         const regLabels = [{ text: sig }, { text: 'DFF' }]
         children.push({
@@ -515,6 +698,10 @@ export function buildElkGraph(tree, moduleIdx = 0) {
       'elk.direction': 'RIGHT',
       'elk.layered.spacing.nodeNodeBetweenLayers': '60',
       'elk.spacing.nodeNode': '48',
+      'elk.spacing.edgeNode': '20',
+      'elk.spacing.edgeEdge': '12',
+      'elk.layered.spacing.edgeNodeBetweenLayers': '24',
+      'elk.layered.spacing.edgeEdgeBetweenLayers': '12',
       'elk.layered.nodePlacement.strategy': 'NETWORK_SIMPLEX',
       'elk.layered.crossingMinimization.strategy': 'LAYER_SWEEP',
       'elk.edgeRouting': 'ORTHOGONAL',
