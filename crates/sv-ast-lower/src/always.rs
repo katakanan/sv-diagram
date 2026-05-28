@@ -89,19 +89,37 @@ fn extract_clock_reset(
             let sig_name = get_str(tree, sig_node)?;
 
             let lower = sig_name.to_lowercase();
-            if edge_kind == EdgeKind::Negedge
-                || lower.contains("rst")
-                || lower.contains("reset")
-            {
+            // 名前ベースの判定を優先する:
+            //   "clk" / "clock" を含む → クロック（エッジ種別に関わらず）
+            //   "rst" / "reset" を含む → リセット
+            //   上記に該当しない場合: posedge → クロック、negedge → リセット（フォールバック）
+            let is_clock_by_name = lower.contains("clk") || lower.contains("clock");
+            let is_reset_by_name = !is_clock_by_name
+                && (lower.contains("rst") || lower.contains("reset"));
+
+            if is_clock_by_name {
+                clock = Some(ClockInfo {
+                    signal_name: sig_name,
+                    edge: edge_kind,
+                });
+            } else if is_reset_by_name {
                 reset = Some(ResetInfo {
                     signal_name: sig_name,
                     active_low: edge_kind == EdgeKind::Negedge,
                 });
             } else {
-                clock = Some(ClockInfo {
-                    signal_name: sig_name,
-                    edge: edge_kind,
-                });
+                // フォールバック: negedge → リセット、posedge → クロック
+                if edge_kind == EdgeKind::Negedge {
+                    reset = Some(ResetInfo {
+                        signal_name: sig_name,
+                        active_low: true,
+                    });
+                } else {
+                    clock = Some(ClockInfo {
+                        signal_name: sig_name,
+                        edge: edge_kind,
+                    });
+                }
             }
         }
     }

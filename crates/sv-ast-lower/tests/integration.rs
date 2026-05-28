@@ -61,6 +61,40 @@ fn test_counter_module() {
     assert!(rst.active_low);
 }
 
+/// negedge clk でも CLK としてパースされることを確認
+#[test]
+fn test_negedge_clk_is_clock() {
+    let sv = r#"
+module neg_clk (
+  input  var logic clk,
+  input  var logic arst_n,
+  input  var logic d,
+  output var logic q
+);
+  always_ff @(negedge clk or negedge arst_n) begin
+    if (!arst_n) begin
+      q <= 1'b0;
+    end else begin
+      q <= d;
+    end
+  end
+endmodule
+"#;
+    let tree = lower(sv, "neg_clk.sv").unwrap();
+    let m = &tree.modules[0];
+    let ab = &m.always_blocks[0];
+
+    // negedge clk → 名前に "clk" を含むのでクロックとして認識
+    let clk = ab.clock.as_ref().expect("clock should be Some");
+    assert_eq!(clk.signal_name, "clk");
+    assert_eq!(clk.edge, EdgeKind::Negedge);
+
+    // arst_n → リセットとして認識
+    let rst = ab.reset.as_ref().expect("reset should be Some");
+    assert_eq!(rst.signal_name, "arst_n");
+    assert!(rst.active_low);
+}
+
 #[test]
 fn test_top_module_instances() {
     let tree = lower(TOP_SV, "top.sv").expect("lower failed");
