@@ -21,11 +21,16 @@ const STYLE = {
   portSize:        8,
   edgeStroke:      '#5566cc',
   edgeWidth:       1.5,
-  labelFont:       'monospace',
+  // エディタと同じプログラミングフォント。リガチャは style 属性で無効化する。
+  labelFont:       "'Cascadia Code', 'Fira Code', 'Consolas', monospace",
   labelSize:       12,
-  subLabelSize:    10,
+  subLabelSize:    11,
   padding:         24,
+  jumpRadius:      5,           // ジャンプオーバー半円の半径 (px)
 }
+
+// リガチャ無効化スタイル（SVG text 要素に共通適用）
+const NO_LIGATURES = "font-variant-ligatures: none; font-feature-settings: 'liga' 0, 'calt' 0;"
 
 function el(tag, attrs = {}, children = []) {
   const e = document.createElementNS(NS, tag)
@@ -34,10 +39,114 @@ function el(tag, attrs = {}, children = []) {
   return e
 }
 function text(str, x, y, { size = STYLE.labelSize, anchor = 'middle', fill = '#1d1d1f', bold = false } = {}) {
-  const t = el('text', { x, y, 'text-anchor': anchor, 'font-family': STYLE.labelFont,
-    'font-size': size, fill, 'font-weight': bold ? '600' : '400' })
+  const t = el('text', {
+    x, y,
+    'text-anchor':  anchor,
+    'font-family':  STYLE.labelFont,
+    'font-size':    size,
+    fill,
+    'font-weight':  bold ? '600' : '400',
+    'letter-spacing': '0.3',
+    style:          NO_LIGATURES,
+  })
   t.textContent = str
   return t
+}
+
+// ─── ジャンプオーバー ─────────────────────────────────────────────
+
+/**
+ * 全エッジから直線セグメントを収集する。
+ * @returns {{ x1,y1,x2,y2, ei,si,pi, isH }[]}
+ */
+function collectAllSegments(edges) {
+  const segs = []
+  edges.forEach((edge, ei) => {
+    ;(edge.sections ?? []).forEach((sec, si) => {
+      const pts = [sec.startPoint, ...(sec.bendPoints ?? []), sec.endPoint]
+      for (let pi = 0; pi < pts.length - 1; pi++) {
+        const p1 = pts[pi], p2 = pts[pi + 1]
+        const isH = Math.abs(p1.y - p2.y) < 0.5
+        const isV = Math.abs(p1.x - p2.x) < 0.5
+        if (isH || isV) {
+          segs.push({ x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y, ei, si, pi, isH })
+        }
+      }
+    })
+  })
+  return segs
+}
+
+/**
+ * 水平セグメントが異なるエッジの垂直セグメントと交差する X 座標を求める。
+ *
+ * 端点共有（接続点）は EPS でガード、近接交差は半円が重なるため除去する。
+ *
+ * @returns {Map<string, number[]>}  key = "ei-si-pi"、値は昇順ソート済み
+ */
+function buildCrossingMap(segs) {
+  const map   = new Map()
+  const hSegs = segs.filter(s =>  s.isH)
+  const vSegs = segs.filter(s => !s.isH)
+  const EPS   = 1.5
+  const R     = STYLE.jumpRadius
+
+  for (const h of hSegs) {
+    const hMinX = Math.min(h.x1, h.x2)
+    const hMaxX = Math.max(h.x1, h.x2)
+    const hy    = h.y1   // 水平なので y1 == y2
+    const xs    = []
+
+    for (const v of vSegs) {
+      if (h.ei === v.ei) continue           // 同一エッジ内は接続点として扱う
+      const vx    = v.x1                    // 垂直なので x1 == x2
+      const vMinY = Math.min(v.y1, v.y2)
+      const vMaxY = Math.max(v.y1, v.y2)
+      if (vx > hMinX + EPS && vx < hMaxX - EPS &&
+          hy > vMinY + EPS && hy < vMaxY - EPS) {
+        xs.push(vx)
+      }
+    }
+    if (xs.length === 0) continue
+
+    xs.sort((a, b) => a - b)
+
+    // 半円が重なる近接クロッシングを除去
+    const deduped = [xs[0]]
+    for (let i = 1; i < xs.length; i++) {
+      if (xs[i] - deduped[deduped.length - 1] > R * 2 + 1) deduped.push(xs[i])
+    }
+    map.set(`${h.ei}-${h.si}-${h.pi}`, deduped)
+  }
+  return map
+}
+
+/**
+ * 水平セグメントのパス文字列を生成する（交差点に上向き半円アークを挿入）。
+ * 先頭の M コマンドは呼び出し元が出力済みであること。
+ *
+ * @param {number}   x1       - セグメント開始 X
+ * @param {number}   y1       - セグメント Y（水平なので始点・終点共通）
+ * @param {number}   x2       - セグメント終了 X
+ * @param {number[]|undefined} crossXs - 交差 X 座標の昇順配列
+ */
+function buildHSegPath(x1, y1, x2, crossXs) {
+  if (!crossXs || crossXs.length === 0) return `L${x2},${y1}`
+
+  const R      = STYLE.jumpRadius
+  const dir    = x2 >= x1 ? 1 : -1
+  // 進行方向に合わせて交差点を並び替える
+  const sorted = dir > 0 ? crossXs : [...crossXs].reverse()
+  const parts  = []
+
+  for (const cx of sorted) {
+    // 半円手前まで直線
+    parts.push(`L${cx - dir * R},${y1}`)
+    // 上向き半円: sweep=0 (counterclockwise) → SVG y 下向き座標系で上方向
+    parts.push(`A${R},${R} 0 0 0 ${cx + dir * R},${y1}`)
+  }
+  parts.push(`L${x2},${y1}`)
+  return parts.join(' ')
 }
 
 /**
@@ -54,14 +163,16 @@ export function renderToSvg(layout) {
   })
 
   // ─── defs: 矢印マーカー ───────────────────────────────────────
+  // markerUnits="userSpaceOnUse" + viewBox でストローク幅が変わっても
+  // 矢印サイズを固定する（strokeWidth 基準だと選択時に拡大してしまう）
   const defs = el('defs')
   defs.innerHTML = `
-    <marker id="arr" markerWidth="8" markerHeight="8"
-            refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+    <marker id="arr" viewBox="0 0 8 8" markerWidth="12" markerHeight="12"
+            refX="7" refY="3" orient="auto" markerUnits="userSpaceOnUse">
       <path d="M0,0 L0,6 L8,3 z" fill="${STYLE.edgeStroke}"/>
     </marker>
-    <marker id="arr-fb" markerWidth="8" markerHeight="8"
-            refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+    <marker id="arr-fb" viewBox="0 0 8 8" markerWidth="12" markerHeight="12"
+            refX="7" refY="3" orient="auto" markerUnits="userSpaceOnUse">
       <path d="M0,0 L0,6 L8,3 z" fill="${STYLE.edgeStroke}" opacity="0.5"/>
     </marker>
   `
@@ -73,22 +184,59 @@ export function renderToSvg(layout) {
     transform: `translate(${pad},${pad})`,
   })
 
+  // ─── クロッシング検出 ─────────────────────────────────────────
+  const allSegs     = collectAllSegments(layout.edges ?? [])
+  const crossingMap = buildCrossingMap(allSegs)
+
   // ─── エッジ（ノードの背面に描画）────────────────────────────
   const edgeGroup = el('g', { class: 'edges' })
-  for (const edge of layout.edges ?? []) {
-    for (const sec of edge.sections ?? []) {
+
+  for (const [ei, edge] of (layout.edges ?? []).entries()) {
+    for (const [si, sec] of (edge.sections ?? []).entries()) {
       const pts = [sec.startPoint, ...(sec.bendPoints ?? []), sec.endPoint]
-      const d = pts.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x},${p.y}`).join(' ')
-      edgeGroup.appendChild(el('path', {
+      let d = `M${pts[0].x},${pts[0].y}`
+
+      for (let pi = 0; pi < pts.length - 1; pi++) {
+        const p1  = pts[pi]
+        const p2  = pts[pi + 1]
+        const isH = Math.abs(p1.y - p2.y) < 0.5
+
+        if (isH) {
+          const crossXs = crossingMap.get(`${ei}-${si}-${pi}`)
+          d += ' ' + buildHSegPath(p1.x, p1.y, p2.x, crossXs)
+        } else {
+          d += ` L${p2.x},${p2.y}`
+        }
+      }
+
+      // エッジグループ: data-id でクリック選択できるようにする
+      const eg = el('g', { class: 'edge', 'data-id': edge.id ?? `e${ei}` })
+
+      // 透明な太いヒットエリア（細い線でも容易にクリックできるよう）
+      eg.appendChild(el('path', {
         d,
+        stroke: 'transparent',
+        'stroke-width': 10,
+        fill: 'none',
+        'pointer-events': 'stroke',
+      }))
+
+      // 表示用パス（ポインターイベントはヒットエリアに委ねる）
+      eg.appendChild(el('path', {
+        d,
+        class: 'edge-line',
         stroke: STYLE.edgeStroke,
         'stroke-width': STYLE.edgeWidth,
         fill: 'none',
         'marker-end': 'url(#arr)',
         'stroke-linejoin': 'round',
+        'pointer-events': 'none',
       }))
+
+      edgeGroup.appendChild(eg)
     }
   }
+
   content.appendChild(edgeGroup)
 
   // ─── ノード ──────────────────────────────────────────────────
@@ -100,14 +248,20 @@ export function renderToSvg(layout) {
     const nw = node.width  ?? 0
     const nh = node.height ?? 0
 
-    const isExt   = node.id.startsWith('ext.')
-    const isConst = node.id.startsWith('const.')
-    const fill    = isExt   ? STYLE.extFill
-                  : isConst ? STYLE.constFill
-                  :           STYLE.nodeFill
-    const stroke  = isExt   ? STYLE.extStroke
-                  : isConst ? STYLE.constStroke
-                  :           STYLE.nodeStroke
+    const isExt    = node.id.startsWith('ext.')
+    const isConst  = node.id.startsWith('const.')
+    const isFfReg  = node.id.startsWith('ff_reg.')
+    const isFfComb = node.id.startsWith('ff_comb.')
+    const fill    = isExt    ? STYLE.extFill
+                  : isConst  ? STYLE.constFill
+                  : isFfReg  ? '#e8f4e8'   // 薄い緑: DFF レジスタ
+                  : isFfComb ? '#f0f8e8'   // 薄い黄緑: 次状態ロジック
+                  :            STYLE.nodeFill
+    const stroke  = isExt    ? STYLE.extStroke
+                  : isConst  ? STYLE.constStroke
+                  : isFfReg  ? '#3a8a3a'
+                  : isFfComb ? '#6a9a3a'
+                  :            STYLE.nodeStroke
 
     const isInstNode = node.id.startsWith('inst.')
     const g = el('g', {
@@ -146,11 +300,58 @@ export function renderToSvg(layout) {
 
       // 定数ノードはポートドットを描かない
       if (!isConst) {
-        g.appendChild(el('rect', {
-          x: px - ps / 2, y: py - ps / 2,
-          width: ps, height: ps,
-          fill: STYLE.portFill, rx: 1,
-        }))
+        // バブル表示に差し替えるポートは正方形ドットをスキップ
+        const isClkNegedge   = isFfReg && port.labels?.[0]?.text === 'CLK' && port.negedge
+        const isRstActiveLow = isFfReg && port.active_low
+        if (!isClkNegedge && !isRstActiveLow) {
+          // 通常のポートドット（境界上の正方形）
+          g.appendChild(el('rect', {
+            x: px - ps / 2, y: py - ps / 2,
+            width: ps, height: ps,
+            fill: STYLE.portFill, rx: 1,
+          }))
+        }
+        // active-low リセットポート: ノード下辺の外側（下方向）にバブル○を描画
+        if (isRstActiveLow) {
+          const Rc = ps * 0.65   // ≈ 5px
+          g.appendChild(el('circle', {
+            cx: px,
+            cy: py + Rc,
+            r:  Rc,
+            fill:           '#fafafa',
+            stroke:         STYLE.portFill,
+            'stroke-width': 1.5,
+          }))
+        }
+        // ff_reg の CLK ポート: ノード内側にクロック三角形を追加描画
+        // WEST ポートの px はノード左辺と一致するため、
+        // 底辺を px に置いて先端をノード内部（+x 方向）へ向ける
+        if (isFfReg && port.labels?.[0]?.text === 'CLK') {
+          const ts = ps * 2   // 三角形サイズ（ポートドットの2倍）
+          g.appendChild(el('polygon', {
+            points: [
+              `${px},${py - ts / 2}`,   // 左上（ノード左辺）
+              `${px},${py + ts / 2}`,   // 左下（ノード左辺）
+              `${px + ts},${py}`,       // 右先端（ノード内部）
+            ].join(' '),
+            fill: 'none',
+            stroke: STYLE.portFill,
+            'stroke-width': 1.5,
+          }))
+          // negedge clk: 三角形の左（ノード外側）にバブル○を追加
+          // 円の右端がノード左辺（px）に接するよう配置する
+          if (port.negedge) {
+            const Rc = ps * 0.65   // ≈ 5px
+            g.appendChild(el('circle', {
+              cx: px - Rc,
+              cy: py,
+              r:  Rc,
+              fill:         '#fafafa',   // 背景色と同じで配線を"切断"して見せる
+              stroke:       STYLE.portFill,
+              'stroke-width': 1.5,
+            }))
+          }
+        }
       }
 
       // ポートラベル（インスタンスのみ表示）

@@ -84,6 +84,62 @@ pub struct AssignNode {
     pub rhs: String,
 }
 
+/// always 本体の式ノード（最小限 AST）
+///
+/// 複雑な式は `Raw` にフォールバックする。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "t", content = "v")]
+pub enum Expr {
+    /// 識別子（信号名）
+    Ident(String),
+    /// 数値・文字列リテラル（"8'd5", "'0", "1'b1" 等）
+    Lit(String),
+    /// 単項演算  op: "!", "~", "&", "|", "^"
+    Unary { op: String, operand: Box<Expr> },
+    /// 二項演算  op: "+", "-", "&", "|", "^", "==", "!=" 等
+    Binary { op: String, lhs: Box<Expr>, rhs: Box<Expr> },
+    /// 三項演算子 c ? t : e
+    Ternary { c: Box<Expr>, t: Box<Expr>, e: Box<Expr> },
+    /// ビット選択 base[idx]
+    Index { base: Box<Expr>, idx: Box<Expr> },
+    /// 範囲選択 base[hi:lo]
+    Slice { base: Box<Expr>, hi: Box<Expr>, lo: Box<Expr> },
+    /// 連結 {a, b, c}
+    Concat(Vec<Expr>),
+    /// パース対象外の複雑な式（元ソース文字列をそのまま保持）
+    Raw(String),
+}
+
+/// always 本体の文ノード
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "t", content = "v")]
+pub enum Stmt {
+    /// if (cond) { then_ } else { else_ }
+    If {
+        cond:   Expr,
+        then_:  Vec<Stmt>,
+        else_:  Vec<Stmt>,
+    },
+    /// case (sel) … endcase
+    Case {
+        sel:      Expr,
+        items:    Vec<CaseItem>,
+        default_: Vec<Stmt>,
+    },
+    /// ノンブロッキング代入 lhs <= rhs  (always_ff)
+    NbAssign { lhs: String, rhs: Expr },
+    /// ブロッキング代入   lhs = rhs   (always_comb / latch)
+    BAssign  { lhs: String, rhs: Expr },
+}
+
+/// case 文の1アイテム
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CaseItem {
+    /// マッチパターン（元ソース文字列）
+    pub pattern: String,
+    pub stmts:   Vec<Stmt>,
+}
+
 /// always_ff / always_comb / always_latch
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AlwaysNode {
@@ -95,6 +151,8 @@ pub struct AlwaysNode {
     /// このブロックが参照（読み取る）信号名一覧
     /// clk・rst は除外済み、driven_signals の信号も除外済み
     pub read_signals: Vec<String>,
+    /// always 本体の文 AST
+    pub body: Vec<Stmt>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

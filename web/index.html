@@ -100,17 +100,26 @@
     #editor-pane { flex: 0 0 38%; }
     #diagram-pane { flex: 1; }
 
-    #sv-source {
+    /* ── CodeMirror エディタ ─────────────────────────────────── */
+    #sv-source-editor {
       flex: 1;
-      border: none;
-      outline: none;
-      resize: none;
-      padding: 12px;
-      font-family: 'Cascadia Code', 'Fira Code', monospace;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+    #sv-source-editor .cm-editor {
+      height: 100%;
       font-size: 13px;
+    }
+    #sv-source-editor .cm-editor.cm-focused {
+      outline: none;
+    }
+    #sv-source-editor .cm-scroller {
+      font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
       line-height: 1.6;
-      color: #1d1d1f;
-      tab-size: 2;
+      /* リガチャ（合字）を無効化: <= が ⇐ に、=== が連結表示されるのを防ぐ */
+      font-variant-ligatures: none;
+      font-feature-settings: 'liga' 0, 'calt' 0;
     }
 
     #diagram-wrap {
@@ -119,6 +128,7 @@
       cursor: grab;
       user-select: none;
       position: relative;
+      min-height: 0;
     }
     /* パン中: 子要素含めて全て grabbing に上書き */
     #diagram-wrap.panning,
@@ -139,6 +149,92 @@
       stroke: #3399ff;
       stroke-width: 2px;
       filter: drop-shadow(0 0 4px rgba(51,153,255,0.45));
+    }
+
+    /* ── エッジ インタラクション ─────────────────────────── */
+    #diagram-wrap .edge { cursor: pointer; }
+
+    /* ホバー */
+    #diagram-wrap .edge:not(.selected):hover .edge-line {
+      stroke: #3399ff;
+      stroke-width: 2.5px;
+    }
+
+    /* 選択状態 */
+    #diagram-wrap .edge.selected .edge-line {
+      stroke: #ff8800;
+      stroke-width: 2.5px;
+      filter: drop-shadow(0 0 5px rgba(255,136,0,0.55));
+    }
+
+    /* ── プロパティパネル ────────────────────────────────────── */
+    #props-panel {
+      flex-shrink: 0;
+      height: 108px;
+      border-top: 1px solid #ddd;
+      background: #f8f8fa;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    #props-header {
+      padding: 4px 12px;
+      background: #f0f0f2;
+      border-bottom: 1px solid #e0e0e4;
+      font-size: 11px;
+      font-weight: 600;
+      color: #666;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    #props-kind {
+      color: #5566cc;
+    }
+    #props-id {
+      color: #999;
+      font-weight: 400;
+      font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+      font-size: 11px;
+      font-variant-ligatures: none;
+      font-feature-settings: 'liga' 0, 'calt' 0;
+    }
+    #props-body {
+      flex: 1;
+      overflow-x: auto;
+      overflow-y: auto;
+      padding: 6px 12px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 2px 20px;
+      align-content: flex-start;
+    }
+    .props-row {
+      display: flex;
+      gap: 5px;
+      align-items: baseline;
+      white-space: nowrap;
+    }
+    .props-key {
+      font-size: 11px;
+      color: #999;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+    }
+    .props-val {
+      font-size: 12px;
+      color: #1d1d1f;
+      font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+      font-variant-ligatures: none;
+      font-feature-settings: 'liga' 0, 'calt' 0;
+    }
+    .props-empty {
+      font-size: 12px;
+      color: #bbb;
+      font-style: italic;
+      align-self: center;
     }
 
     #status {
@@ -165,11 +261,20 @@
   <div class="workspace">
     <div class="pane" id="editor-pane">
       <div class="pane-header">SystemVerilog Source</div>
-      <textarea id="sv-source" spellcheck="false"></textarea>
+      <div id="sv-source-editor"></div>
     </div>
     <div class="pane" id="diagram-pane">
       <div class="pane-header">Diagram</div>
       <div id="diagram-wrap"></div>
+      <div id="props-panel">
+        <div id="props-header">
+          <span id="props-kind">Properties</span>
+          <span id="props-id"></span>
+        </div>
+        <div id="props-body">
+          <span class="props-empty">ノードまたはエッジを選択してください</span>
+        </div>
+      </div>
     </div>
   </div>
 

@@ -2,6 +2,9 @@ import ELK from 'elkjs/lib/elk.bundled.js'
 import { lower_sv } from '../wasm/sv_wasm.js'
 import { buildElkGraph } from './elk-builder.js'
 import { renderToSvg }   from './renderer.js'
+import { EditorView, basicSetup } from 'codemirror'
+import { StreamLanguage }         from '@codemirror/language'
+import { verilog }                from '@codemirror/legacy-modes/mode/verilog'
 
 // ─── デフォルトの SV ソース ──────────────────────────────────────
 const DEFAULT_SV = `\
@@ -176,6 +179,68 @@ module pipeline_top #(
     .valid_out (valid_out)
   );
 endmodule
+
+// ================================================================
+// リセットサンプル
+//
+// reset_demo:
+//   q_async : 非同期リセット FF（negedge arst_n が感度リストに含まれる）
+//   q_sync  : 同期リセット FF（clk のみが感度リスト、if 文でリセット処理）
+// ================================================================
+
+module reset_demo (
+  input  var logic clk,
+  input  var logic arst_n,    // 非同期リセット（アクティブロー）
+  input  var logic srst,      // 同期リセット（アクティブハイ）
+  input  var logic d_async,
+  input  var logic d_sync,
+  output var logic q_async,
+  output var logic q_sync
+);
+  // 非同期リセット: negedge arst_n を感度リストに含める
+  always_ff @(posedge clk or negedge arst_n) begin
+    if (!arst_n) begin
+      q_async <= 1'b0;
+    end else begin
+      q_async <= d_async;
+    end
+  end
+
+  // 同期リセット: 感度リストは posedge clk のみ
+  //              リセット条件は always_ff 内の if 文で処理
+  always_ff @(posedge clk) begin
+    if (srst) begin
+      q_sync <= 1'b0;
+    end else begin
+      q_sync <= d_sync;
+    end
+  end
+endmodule
+
+// ================================================================
+// 定数 assign サンプル
+//
+// const_demo:
+//   assign hoge = 1'd0  のような純定数 assign を定数ノードで表示するデモ
+// ================================================================
+
+module const_demo (
+  output var logic [7:0] zero_out,
+  output var logic [7:0] const_out,
+  output var logic       tie_hi,
+  output var logic       tie_lo,
+  input  var logic [7:0] passthru_in,
+  output var logic [7:0] passthru_out
+);
+  // 純定数 assign: RHS がリテラルのみ → 定数ノードとエッジで表示
+  assign zero_out   = 8'h00;
+  assign const_out  = 8'hAB;
+  assign tie_hi     = 1'b1;
+  assign tie_lo     = 1'b0;
+
+  // 信号 assign: 従来どおり assign ノード
+  assign passthru_out = passthru_in;
+endmodule
 `
 
 // ─── DOM refs ───────────────────────────────────────────────────
@@ -183,10 +248,31 @@ const statusEl     = document.getElementById('status')
 const renderBtn    = document.getElementById('render-btn')
 const backBtn      = document.getElementById('back-btn')
 const moduleSelect = document.getElementById('module-select')
-const sourceEl     = document.getElementById('sv-source')
 const diagramWrap  = document.getElementById('diagram-wrap')
+const propsKindEl  = document.getElementById('props-kind')
+const propsIdEl    = document.getElementById('props-id')
+const propsBodyEl  = document.getElementById('props-body')
 
-sourceEl.value = DEFAULT_SV
+// ─── CodeMirror エディタ初期化 ────────────────────────────────────
+const editor = new EditorView({
+  doc: DEFAULT_SV,
+  extensions: [
+    basicSetup,
+    StreamLanguage.define(verilog),
+    EditorView.theme({
+      // ベースカラーをページの白背景に合わせる
+      '&': { background: '#fff' },
+      '.cm-gutters': {
+        background: '#f5f5f7',
+        borderRight: '1px solid #e0e0e0',
+        color: '#999',
+      },
+      '.cm-activeLineGutter': { background: '#eef0f8' },
+      '.cm-activeLine':       { background: '#eef0f820' },
+    }),
+  ],
+  parent: document.getElementById('sv-source-editor'),
+})
 
 // ─── ELK インスタンス ─────────────────────────────────────────
 const elk = new ELK()
@@ -199,6 +285,172 @@ let currentModuleIdx = 0
 /** ドリルダウン履歴: { moduleIdx, moduleName }[] */
 let navStack         = []
 
+/** 最新レイアウト結果（ポート→エッジ逆引き用） */
+let currentLayout = null
+
+/**
+ * ELK レイアウト結果からポート ID → エッジ ID 一覧のマップを構築する。
+ * ext.* ノード選択時に接続エッジをハイライトするために使用。
+ * @param {object} layout - elk.layout() の戻り値
+ * @returns {Map<string, string[]>}
+ */
+function buildPortEdgeMap(layout) {
+  const map = new Map()
+  for (const edge of layout.edges ?? []) {
+    for (const pid of [...(edge.sources ?? []), ...(edge.targets ?? [])]) {
+      if (!map.has(pid)) map.set(pid, [])
+      map.get(pid).push(edge.id)
+    }
+  }
+  return map
+}
+
+// ─── プロパティパネル ─────────────────────────────────────────────
+
+function esc(s) {
+  return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+/** プロパティパネルを更新する */
+function renderProps(kind, id, rows) {
+  propsKindEl.textContent = kind
+  propsIdEl.textContent   = id ? `— ${id}` : ''
+  if (!rows || rows.length === 0) {
+    propsBodyEl.innerHTML = '<span class="props-empty">ノードまたはエッジを選択してください</span>'
+    return
+  }
+  propsBodyEl.innerHTML = rows.map(([k, v]) =>
+    `<div class="props-row">
+       <span class="props-key">${esc(k)}</span>
+       <span class="props-val">${esc(v)}</span>
+     </div>`
+  ).join('')
+}
+
+/** ノード ID からプロパティ行を返す */
+function getNodeProps(nodeId) {
+  const mod = currentTree?.modules[currentModuleIdx]
+
+  // ─ 外部ポート ─────────────────────────────────────────────────
+  if (nodeId.startsWith('ext.')) {
+    const portName = nodeId.slice(4)
+    const port = mod?.ports.find(p => p.name === portName)
+    if (!port) return { kind: 'Port', rows: [['id', nodeId]] }
+    return {
+      kind: `Port (${port.direction})`,
+      rows: [
+        ['name',      port.name],
+        ['direction', port.direction],
+        ['type',      port.data_type],
+      ],
+    }
+  }
+
+  // ─ モジュールインスタンス ──────────────────────────────────────
+  if (nodeId.startsWith('inst.')) {
+    const instName = nodeId.slice(5)
+    const inst = mod?.instances.find(i => i.instance_name === instName)
+    if (!inst) return { kind: 'Instance', rows: [['id', nodeId]] }
+    const rows = [
+      ['instance', inst.instance_name],
+      ['module',   inst.module_name],
+    ]
+    for (const p of inst.param_overrides) {
+      rows.push([`#${p.param_name}`, p.value])
+    }
+    for (const c of inst.port_connections) {
+      rows.push([`.${c.port_name}`, c.signal || '(unconnected)'])
+    }
+    return { kind: 'Instance', rows }
+  }
+
+  // ─ FF 次状態ロジックノード ────────────────────────────────────
+  if (nodeId.startsWith('ff_comb.')) {
+    // ff_comb.{i}
+    const idx = parseInt(nodeId.split('.')[1])
+    const ab  = mod?.always_blocks[idx]
+    if (!ab) return { kind: 'FF Next', rows: [['id', nodeId]] }
+    const rows = [['kind', 'Next-state logic (combinational)']]
+    if (ab.driven_signals.length > 0) rows.push(['drives',  ab.driven_signals.join(', ')])
+    if (ab.read_signals?.length > 0)  rows.push(['reads',   ab.read_signals.join(', ')])
+    return { kind: 'FF Next', rows }
+  }
+
+  // ─ FF レジスタノード ──────────────────────────────────────────
+  if (nodeId.startsWith('ff_reg.')) {
+    // ff_reg.{i}.{sig}
+    const parts = nodeId.split('.')
+    const idx   = parseInt(parts[1])
+    const sig   = parts.slice(2).join('.')
+    const ab    = mod?.always_blocks[idx]
+    if (!ab) return { kind: 'DFF', rows: [['id', nodeId]] }
+    const rows = [['signal', sig], ['type', 'D flip-flop']]
+    if (ab.clock) {
+      rows.push(['CLK', `${ab.clock.edge === 'Posedge' ? '↑' : '↓'} ${ab.clock.signal_name}`])
+    }
+    if (ab.reset) {
+      rows.push(['RST', `${ab.reset.signal_name} (active-${ab.reset.active_low ? 'low' : 'high'})`])
+    }
+    return { kind: 'DFF', rows }
+  }
+
+  // ─ always ブロック (comb/latch) ───────────────────────────────
+  if (nodeId.startsWith('always.')) {
+    const idx = parseInt(nodeId.slice(7))
+    const ab  = mod?.always_blocks[idx]
+    if (!ab) return { kind: 'Always', rows: [['id', nodeId]] }
+    const rows = [['kind', ab.kind]]
+    if (ab.driven_signals.length > 0) rows.push(['drives', ab.driven_signals.join(', ')])
+    if (ab.read_signals?.length > 0)  rows.push(['reads',  ab.read_signals.join(', ')])
+    return { kind: `Always ${ab.kind}`, rows }
+  }
+
+  // ─ assign / MUX ──────────────────────────────────────────────
+  if (nodeId.startsWith('assign.')) {
+    const parts    = nodeId.split('.')
+    const assignIdx = parseInt(parts[1])
+    const assign   = mod?.assigns[assignIdx]
+    if (parts.length >= 3 && parts[2].startsWith('m')) {
+      // MUX ノード
+      return {
+        kind: 'MUX',
+        rows: assign
+          ? [['assign', `${assign.lhs} = ${assign.rhs}`], ['mux', parts[2]]]
+          : [['id', nodeId]],
+      }
+    }
+    if (!assign) return { kind: 'Assign', rows: [['id', nodeId]] }
+    return {
+      kind: 'Assign',
+      rows: [
+        ['lhs', assign.lhs],
+        ['rhs', assign.rhs],
+      ],
+    }
+  }
+
+  // ─ 定数ノード ────────────────────────────────────────────────
+  if (nodeId.startsWith('const.')) {
+    const node = currentLayout?.children?.find(c => c.id === nodeId)
+    return {
+      kind: 'Constant',
+      rows: [['value', node?.labels?.[0]?.text ?? nodeId.slice(6)]],
+    }
+  }
+
+  return { kind: 'Node', rows: [['id', nodeId]] }
+}
+
+/** エッジ ID からプロパティ行を返す */
+function getEdgeProps(edgeId) {
+  const edge = currentLayout?.edges?.find(e => e.id === edgeId)
+  if (!edge) return { kind: 'Edge', rows: [['id', edgeId]] }
+  const rows = []
+  if (edge.sources?.length)  rows.push(['from', edge.sources.join(', ')])
+  if (edge.targets?.length)  rows.push(['to',   edge.targets.join(', ')])
+  return { kind: 'Edge', rows }
+}
+
 function updateBackBtn() {
   if (navStack.length === 0) {
     backBtn.disabled    = true
@@ -210,16 +462,69 @@ function updateBackBtn() {
   }
 }
 
-// ─── ノード選択 ───────────────────────────────────────────────
+// ─── ノード・エッジ選択 ───────────────────────────────────────
 let selectedNodeId = null
+let selectedEdgeId = null
 
 function selectNode(nodeId) {
-  diagramWrap.querySelectorAll('.node.selected')
-    .forEach(n => n.classList.remove('selected'))
+  // 前の選択をすべて解除
+  diagramWrap.querySelectorAll('.node.selected').forEach(n => n.classList.remove('selected'))
+  diagramWrap.querySelectorAll('.edge.selected').forEach(e => e.classList.remove('selected'))
   selectedNodeId = nodeId ?? null
-  if (selectedNodeId) {
-    diagramWrap.querySelector(`.node[data-id="${selectedNodeId}"]`)
-      ?.classList.add('selected')
+  selectedEdgeId = null
+
+  if (!selectedNodeId) {
+    renderProps('Properties', '', [])
+    return
+  }
+
+  // ノードをハイライト
+  diagramWrap.querySelector(`.node[data-id="${selectedNodeId}"]`)?.classList.add('selected')
+
+  // プロパティパネル更新
+  const { kind, rows } = getNodeProps(selectedNodeId)
+  renderProps(kind, selectedNodeId, rows)
+
+  // 特定ノードは接続エッジも全てハイライト
+  if (currentLayout) {
+    const portMap    = buildPortEdgeMap(currentLayout)
+    let   portIds    = []
+
+    if (selectedNodeId.startsWith('ext.')) {
+      portIds = [`${selectedNodeId}.p`]
+    } else if (selectedNodeId.startsWith('const.')) {
+      portIds = [`${selectedNodeId}.out`]
+    } else if (selectedNodeId.startsWith('ff_comb.')) {
+      // ff_comb の全ポート（WEST 入力 + EAST 出力）のエッジをハイライト
+      portIds = (currentLayout.children ?? [])
+        .find(c => c.id === selectedNodeId)
+        ?.ports?.map(p => p.id) ?? []
+    } else if (selectedNodeId.startsWith('ff_reg.')) {
+      // ff_reg の全ポートのエッジをハイライト
+      portIds = (currentLayout.children ?? [])
+        .find(c => c.id === selectedNodeId)
+        ?.ports?.map(p => p.id) ?? []
+    }
+
+    for (const pid of portIds) {
+      for (const eid of portMap.get(pid) ?? []) {
+        diagramWrap.querySelector(`.edge[data-id="${eid}"]`)?.classList.add('selected')
+      }
+    }
+  }
+}
+
+function selectEdge(edgeId) {
+  diagramWrap.querySelectorAll('.node.selected').forEach(n => n.classList.remove('selected'))
+  diagramWrap.querySelectorAll('.edge.selected').forEach(e => e.classList.remove('selected'))
+  selectedNodeId = null
+  selectedEdgeId = edgeId ?? null
+  if (selectedEdgeId) {
+    diagramWrap.querySelector(`.edge[data-id="${selectedEdgeId}"]`)?.classList.add('selected')
+    const { kind, rows } = getEdgeProps(selectedEdgeId)
+    renderProps(kind, selectedEdgeId, rows)
+  } else {
+    renderProps('Properties', '', [])
   }
 }
 
@@ -294,11 +599,21 @@ diagramWrap.addEventListener('wheel', e => {
   applyTransform()
 }, { passive: false })
 
-// ─── クリック: ノード選択 ─────────────────────────────────────
+// ─── クリック: ノード・エッジ選択 ────────────────────────────
 diagramWrap.addEventListener('click', e => {
   if (panMoved) { panMoved = false; return }  // ドラッグ後のクリックは無視
   const nodeEl = e.target.closest('.node')
-  selectNode(nodeEl?.dataset.id ?? null)
+  const edgeEl = e.target.closest('.edge')
+  if (nodeEl) {
+    selectEdge(null)
+    selectNode(nodeEl.dataset.id)
+  } else if (edgeEl) {
+    selectNode(null)
+    selectEdge(edgeEl.dataset.id)
+  } else {
+    selectNode(null)
+    selectEdge(null)
+  }
 })
 
 // ─── ダブルクリック: インスタンスにドリルダウン ───────────────
@@ -357,10 +672,12 @@ async function renderModule(moduleIdx) {
   panOffset        = { x: 0, y: 0 }
   zoom             = 1.0
   selectedNodeId   = null
+  selectedEdgeId   = null
 
   try {
     const elkGraph = buildElkGraph(currentTree, moduleIdx)
     const layout   = await elk.layout(elkGraph)
+    currentLayout  = layout                  // ポート→エッジ逆引き用に保持
     const svg      = renderToSvg(layout)
     diagramWrap.innerHTML = ''
     diagramWrap.appendChild(svg)
@@ -384,7 +701,7 @@ async function render() {
   updateBackBtn()
 
   try {
-    const json  = lower_sv(sourceEl.value)
+    const json  = lower_sv(editor.state.doc.toString())
     currentTree = JSON.parse(json)
 
     updateModuleSelect(currentTree.modules)

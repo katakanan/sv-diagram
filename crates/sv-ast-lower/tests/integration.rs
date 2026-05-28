@@ -61,6 +61,40 @@ fn test_counter_module() {
     assert!(rst.active_low);
 }
 
+/// negedge clk でも CLK としてパースされることを確認
+#[test]
+fn test_negedge_clk_is_clock() {
+    let sv = r#"
+module neg_clk (
+  input  var logic clk,
+  input  var logic arst_n,
+  input  var logic d,
+  output var logic q
+);
+  always_ff @(negedge clk or negedge arst_n) begin
+    if (!arst_n) begin
+      q <= 1'b0;
+    end else begin
+      q <= d;
+    end
+  end
+endmodule
+"#;
+    let tree = lower(sv, "neg_clk.sv").unwrap();
+    let m = &tree.modules[0];
+    let ab = &m.always_blocks[0];
+
+    // negedge clk → 名前に "clk" を含むのでクロックとして認識
+    let clk = ab.clock.as_ref().expect("clock should be Some");
+    assert_eq!(clk.signal_name, "clk");
+    assert_eq!(clk.edge, EdgeKind::Negedge);
+
+    // arst_n → リセットとして認識
+    let rst = ab.reset.as_ref().expect("reset should be Some");
+    assert_eq!(rst.signal_name, "arst_n");
+    assert!(rst.active_low);
+}
+
 #[test]
 fn test_top_module_instances() {
     let tree = lower(TOP_SV, "top.sv").expect("lower failed");
@@ -182,6 +216,78 @@ endmodule
     // RHS が空でないこと、および先頭トークンが "req" であることを確認
     assert!(!m.assigns[0].rhs.is_empty());
     assert!(m.assigns[0].rhs.contains("req"));
+}
+
+/// `var` キーワードなしのポート宣言 (`input logic hoge`)
+#[test]
+fn test_port_without_var() {
+    let sv = r#"
+module t (
+  input  logic       clk,
+  input  logic       rst_n,
+  output logic [7:0] data_out
+);
+endmodule
+"#;
+    let tree = lower(sv, "t.sv").unwrap();
+    let m = &tree.modules[0];
+
+    assert_eq!(m.ports.len(), 3);
+
+    let clk = &m.ports[0];
+    assert_eq!(clk.name, "clk");
+    assert_eq!(clk.direction, PortDirection::Input);
+
+    let rst = &m.ports[1];
+    assert_eq!(rst.name, "rst_n");
+    assert_eq!(rst.direction, PortDirection::Input);
+
+    let dout = &m.ports[2];
+    assert_eq!(dout.name, "data_out");
+    assert_eq!(dout.direction, PortDirection::Output);
+    // ビット幅付き型が取れているか
+    assert!(dout.data_type.contains("logic"), "data_type was: {}", dout.data_type);
+}
+
+/// var あり・なし混在ポート
+#[test]
+fn test_port_mixed_var() {
+    let sv = r#"
+module t (
+  input  var logic clk,
+  input      logic rst_n,
+  output var logic y
+);
+endmodule
+"#;
+    let tree = lower(sv, "t.sv").unwrap();
+    let m = &tree.modules[0];
+
+    assert_eq!(m.ports.len(), 3);
+    assert_eq!(m.ports[0].name, "clk");
+    assert_eq!(m.ports[0].direction, PortDirection::Input);
+    assert_eq!(m.ports[1].name, "rst_n");
+    assert_eq!(m.ports[1].direction, PortDirection::Input);
+    assert_eq!(m.ports[2].name, "y");
+    assert_eq!(m.ports[2].direction, PortDirection::Output);
+}
+
+/// always_ff の body AST が生成されるか
+#[test]
+fn test_always_ff_body_ast() {
+    let tree = lower(COUNTER_SV, "counter.sv").unwrap();
+    let m = &tree.modules[0];
+    let ab = &m.always_blocks[0];
+
+    // body は空でない
+    assert!(!ab.body.is_empty(), "always_ff body should not be empty");
+
+    // トップレベルに Stmt::If があるはず (if (!rst_n) begin...end else begin...end)
+    let has_if = ab.body.iter().any(|s| matches!(s, Stmt::If { .. }));
+    assert!(has_if, "expected Stmt::If in body, got: {:?}", ab.body);
+
+    // driven_signals に count が含まれる
+    assert!(ab.driven_signals.contains(&"count".to_string()));
 }
 
 /// ビット演算を含む assign
