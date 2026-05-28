@@ -363,6 +363,7 @@ export function buildElkGraph(tree, moduleIdx = 0) {
             id: rstPid,
             labels:        [{ text: rstLabel }],
             layoutOptions: { 'port.side': 'SOUTH', 'port.index': '0' },
+            ...(always.reset.active_low ? { active_low: true } : {}),
           })
           tap(always.reset.signal_name, regId, rstPid, 'sink')
         }

@@ -300,14 +300,27 @@ export function renderToSvg(layout) {
 
       // 定数ノードはポートドットを描かない
       if (!isConst) {
-        // ff_reg の negedge CLK はバブル（○）に差し替えるため正方形ドットをスキップ
-        const isClkNegedge = isFfReg && port.labels?.[0]?.text === 'CLK' && port.negedge
-        if (!isClkNegedge) {
+        // バブル表示に差し替えるポートは正方形ドットをスキップ
+        const isClkNegedge   = isFfReg && port.labels?.[0]?.text === 'CLK' && port.negedge
+        const isRstActiveLow = isFfReg && port.active_low
+        if (!isClkNegedge && !isRstActiveLow) {
           // 通常のポートドット（境界上の正方形）
           g.appendChild(el('rect', {
             x: px - ps / 2, y: py - ps / 2,
             width: ps, height: ps,
             fill: STYLE.portFill, rx: 1,
+          }))
+        }
+        // active-low リセットポート: ノード下辺の外側（下方向）にバブル○を描画
+        if (isRstActiveLow) {
+          const Rc = ps * 0.65   // ≈ 5px
+          g.appendChild(el('circle', {
+            cx: px,
+            cy: py + Rc,
+            r:  Rc,
+            fill:           '#fafafa',
+            stroke:         STYLE.portFill,
+            'stroke-width': 1.5,
           }))
         }
         // ff_reg の CLK ポート: ノード内側にクロック三角形を追加描画
