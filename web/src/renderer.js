@@ -300,12 +300,16 @@ export function renderToSvg(layout) {
 
       // 定数ノードはポートドットを描かない
       if (!isConst) {
-        // 通常のポートドット（境界上の正方形）は常に描画
-        g.appendChild(el('rect', {
-          x: px - ps / 2, y: py - ps / 2,
-          width: ps, height: ps,
-          fill: STYLE.portFill, rx: 1,
-        }))
+        // ff_reg の negedge CLK はバブル（○）に差し替えるため正方形ドットをスキップ
+        const isClkNegedge = isFfReg && port.labels?.[0]?.text === 'CLK' && port.negedge
+        if (!isClkNegedge) {
+          // 通常のポートドット（境界上の正方形）
+          g.appendChild(el('rect', {
+            x: px - ps / 2, y: py - ps / 2,
+            width: ps, height: ps,
+            fill: STYLE.portFill, rx: 1,
+          }))
+        }
         // ff_reg の CLK ポート: ノード内側にクロック三角形を追加描画
         // WEST ポートの px はノード左辺と一致するため、
         // 底辺を px に置いて先端をノード内部（+x 方向）へ向ける
@@ -321,6 +325,19 @@ export function renderToSvg(layout) {
             stroke: STYLE.portFill,
             'stroke-width': 1.5,
           }))
+          // negedge clk: 三角形の左（ノード外側）にバブル○を追加
+          // 円の右端がノード左辺（px）に接するよう配置する
+          if (port.negedge) {
+            const Rc = ps * 0.65   // ≈ 5px
+            g.appendChild(el('circle', {
+              cx: px - Rc,
+              cy: py,
+              r:  Rc,
+              fill:         '#fafafa',   // 背景色と同じで配線を"切断"して見せる
+              stroke:       STYLE.portFill,
+              'stroke-width': 1.5,
+            }))
+          }
         }
       }
 

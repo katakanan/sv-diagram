@@ -351,7 +351,8 @@ export function buildElkGraph(tree, moduleIdx = 0) {
           // WEST: 時計回り(下→上)なので index が大きいほど上に配置される
           // D を上(index:1)、CLK を下(index:0)にする
           { id: dPid,   labels: [{ text: 'D' }],   layoutOptions: { 'port.side': 'WEST', 'port.index': '1' } },
-          { id: clkPid, labels: [{ text: 'CLK' }], layoutOptions: { 'port.side': 'WEST', 'port.index': '0' } },
+          { id: clkPid, labels: [{ text: 'CLK' }], layoutOptions: { 'port.side': 'WEST', 'port.index': '0' },
+            ...(always.clock?.edge === 'Negedge' ? { negedge: true } : {}) },
           { id: qPid,   labels: [{ text: 'Q' }],   layoutOptions: { 'port.side': 'EAST', 'port.index': '0' } },
         ]
 
