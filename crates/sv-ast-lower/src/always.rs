@@ -447,7 +447,14 @@ fn lower_cond(
 }
 
 /// ConditionalStatement の CondPredicate（if の条件式）を source から取得する。
-/// if (...) の括弧内テキストを返す。
+///
+/// CondPredicate の全子トークンを DFS でスキャンして min_offset..max_end のスパンを計算し、
+/// そのソース文字列を返す。
+///
+/// 旧実装は `source[start..].find('(')` でソースを前方探索していたため、
+/// CondPredicate が括弧の内側から始まる場合（`if (!rst_n)` の `!rst_n` など）に
+/// 全く関係ない箇所の `(` を拾い、別モジュールのポートリスト等を誤って
+/// 条件式として返すバグがあった。
 fn extract_cond_pred_raw(
     cs: &sv_parser::ConditionalStatement,
     source: &str,
@@ -455,44 +462,22 @@ fn extract_cond_pred_raw(
     use sv_parser::unwrap_locate;
     for node in cs {
         if let RefNode::CondPredicate(cp) = node {
-            if let Some(loc) = unwrap_locate!(cp) {
-                // CondPredicate の先頭から括弧内コンテンツを取得
-                return Some(extract_paren_content(source, loc.offset));
+            let mut min_off = usize::MAX;
+            let mut max_end = 0usize;
+            // CondPredicate 配下の全ノードのスパンを集める
+            for sub in cp {
+                if let Some(loc) = unwrap_locate!(sub) {
+                    if loc.offset < min_off { min_off = loc.offset; }
+                    let end = loc.offset + loc.len;
+                    if end > max_end { max_end = end; }
+                }
+            }
+            if min_off < usize::MAX {
+                return source.get(min_off..max_end).map(|s| s.trim().to_string());
             }
         }
     }
     None
-}
-
-/// `source[start..]` から括弧の中身（`if (` の直後）を取り出す。
-/// start は `(` の直前のトークン先頭か `if` キーワード周辺を想定。
-/// 実際には if文の条件 = `if (` ... `)` なので、最初の `(` から対応する `)` を探す。
-fn extract_paren_content(source: &str, _start: usize) -> String {
-    // CondPredicate 自体のオフセットから直接テキストを取る方が正確だが、
-    // unwrap_locate! が単一トークンしか返さないため、
-    // 安全な Raw フォールバックとしてトークン文字列のみを返す。
-    // 詳細な実装は将来の拡張ポイント。
-    source.get(_start..)
-        .and_then(|s| {
-            // '(' を探してネストカウントでペアを探す
-            let paren_start = s.find('(')?;
-            let inner = &s[paren_start + 1..];
-            let mut depth = 1usize;
-            let mut end = 0usize;
-            for (i, c) in inner.char_indices() {
-                match c {
-                    '(' => depth += 1,
-                    ')' => {
-                        depth -= 1;
-                        if depth == 0 { end = i; break; }
-                    }
-                    _ => {}
-                }
-            }
-            if depth == 0 { Some(inner[..end].trim().to_string()) }
-            else { None }
-        })
-        .unwrap_or_default()
 }
 
 /// "else" キーワードのソースオフセットを CS 内から探す。
