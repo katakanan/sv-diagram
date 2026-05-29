@@ -743,6 +743,63 @@ function initWasm() {
   }
 }
 
+// ─── コンパウンドノード平坦化 ────────────────────────────────────
+
+/**
+ * ELK レイアウト結果のコンパウンドノード（children を持つノード）を平坦化する。
+ * - 子ノードの x/y を絶対座標に変換
+ * - コンパウンド内部エッジのセクション座標を絶対化して root edges に昇格
+ * - コンパウンドノード自体に _isGroup フラグを付与（背景描画用）
+ * @param {object} layout - elk.layout() の戻り値
+ * @returns {object}       平坦化済みレイアウト
+ */
+function flattenLayout(layout) {
+  const flatNodes = []
+  const flatEdges = [...(layout.edges ?? [])]
+
+  function flatten(container, ox, oy) {
+    for (const node of container.children ?? []) {
+      const ax = (node.x ?? 0) + ox
+      const ay = (node.y ?? 0) + oy
+
+      if (node.children?.length > 0) {
+        // コンパウンドノード → 背景グループとして追加
+        flatNodes.push({
+          ...node,
+          x: ax, y: ay,
+          children: undefined,
+          edges:    undefined,
+          _isGroup: true,
+        })
+        // 子ノードを再帰展開
+        flatten(node, ax, ay)
+        // 内部エッジをルート絶対座標に変換して追加
+        for (const edge of node.edges ?? []) {
+          flatEdges.push(offsetEdgeSections(edge, ax, ay))
+        }
+      } else {
+        flatNodes.push({ ...node, x: ax, y: ay })
+      }
+    }
+  }
+
+  flatten(layout, 0, 0)
+  return { ...layout, children: flatNodes, edges: flatEdges }
+}
+
+/** エッジセクションの全座標を (dx, dy) だけオフセットする */
+function offsetEdgeSections(edge, dx, dy) {
+  return {
+    ...edge,
+    sections: (edge.sections ?? []).map(sec => ({
+      ...sec,
+      startPoint: { x: sec.startPoint.x + dx, y: sec.startPoint.y + dy },
+      endPoint:   { x: sec.endPoint.x   + dx, y: sec.endPoint.y   + dy },
+      bendPoints: (sec.bendPoints ?? []).map(bp => ({ x: bp.x + dx, y: bp.y + dy })),
+    })),
+  }
+}
+
 // ─── モジュール単体レンダリング ─────────────────────────────────
 /** currentTree の moduleIdx 番目のモジュールをレイアウト→SVG描画する */
 async function renderModule(moduleIdx) {
@@ -753,9 +810,10 @@ async function renderModule(moduleIdx) {
   selectedEdgeId   = null
 
   try {
-    const elkGraph = buildElkGraph(currentTree, moduleIdx)
-    const layout   = await elk.layout(elkGraph)
-    currentLayout  = layout                  // ポート→エッジ逆引き用に保持
+    const elkGraph  = buildElkGraph(currentTree, moduleIdx)
+    const rawLayout = await elk.layout(elkGraph)
+    const layout    = flattenLayout(rawLayout)  // コンパウンドを平坦化
+    currentLayout  = layout                     // ポート→エッジ逆引き用に保持
     const svg      = renderToSvg(layout)
     diagramWrap.innerHTML = ''
     diagramWrap.appendChild(svg)
