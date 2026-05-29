@@ -317,3 +317,117 @@ endmodule
     assert!(any_a.rhs.contains('|'));
     assert!(any_a.rhs.contains('a'));
 }
+
+/// always_comb の case 文が Stmt::Case に変換されるか
+#[test]
+fn test_always_comb_case_body() {
+    let sv = r#"
+module ctrl(
+  input  var logic [1:0] op,
+  output var logic [1:0] alu_op,
+  output var logic       ctrl_out
+);
+  always_comb begin
+    case (op)
+      2'b00: begin alu_op = 2'b00; ctrl_out = 1'b1; end
+      2'b01: begin alu_op = 2'b01; ctrl_out = 1'b0; end
+      2'b10: begin alu_op = 2'b10; ctrl_out = 1'b0; end
+      default: begin alu_op = 2'b00; ctrl_out = 1'b0; end
+    endcase
+  end
+endmodule
+"#;
+    let tree = lower(sv, "ctrl.sv").unwrap();
+    let m    = &tree.modules[0];
+    assert_eq!(m.always_blocks.len(), 1);
+    let ab   = &m.always_blocks[0];
+    assert_eq!(ab.kind, AlwaysKind::Comb);
+
+    // body の先頭に Case があること
+    assert_eq!(ab.body.len(), 1, "body should have exactly 1 top-level stmt");
+    let case_stmt = &ab.body[0];
+    match case_stmt {
+        Stmt::Case { sel, items, default_ } => {
+            // セレクタが "op"
+            match sel {
+                Expr::Ident(s) => assert_eq!(s, "op"),
+                other => panic!("expected Ident(op), got {:?}", other),
+            }
+            // non-default アイテムが 3 つ
+            assert_eq!(items.len(), 3, "expected 3 non-default items, got {:?}", items.len());
+            // 各アイテムに alu_op への代入があること
+            for item in items {
+                let has_alu_op = item.stmts.iter().any(|s| matches!(s, Stmt::BAssign { lhs, .. } if lhs == "alu_op"));
+                assert!(has_alu_op, "item {:?} missing alu_op assignment", item.pattern);
+            }
+            // default_ に代入があること
+            assert!(!default_.is_empty(), "default_ should not be empty");
+        }
+        other => panic!("expected Stmt::Case, got {:?}", other),
+    }
+}
+
+/// always_ff の case 文が Stmt::Case に変換されるか（if の中の case）
+#[test]
+fn test_always_ff_case_in_if() {
+    let sv = r#"
+module regfile(
+  input  var logic       clk,
+  input  var logic       rst_n,
+  input  var logic [1:0] rd,
+  input  var logic [7:0] wd,
+  input  var logic       we
+);
+  logic [7:0] r0;
+  logic [7:0] r1;
+
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      r0 <= '0;
+      r1 <= '0;
+    end else begin
+      if (we) begin
+        case (rd)
+          2'd0: r0 <= wd;
+          2'd1: r1 <= wd;
+          default: r0 <= '0;
+        endcase
+      end
+    end
+  end
+endmodule
+"#;
+    let tree = lower(sv, "regfile.sv").unwrap();
+    let m    = &tree.modules[0];
+    let ab   = &m.always_blocks[0];
+
+    // body の先頭は If(rst_n)
+    assert!(!ab.body.is_empty());
+    let top = &ab.body[0];
+    let else_body = match top {
+        Stmt::If { else_, .. } => else_,
+        other => panic!("expected Stmt::If, got {:?}", other),
+    };
+
+    // else-branch の先頭は If(we)
+    assert!(!else_body.is_empty());
+    let we_if = &else_body[0];
+    let we_then = match we_if {
+        Stmt::If { then_, .. } => then_,
+        other => panic!("expected Stmt::If(we), got {:?}", other),
+    };
+
+    // If(we) の then に Case(rd) があること
+    assert!(!we_then.is_empty(), "If(we).then_ should not be empty");
+    let case_stmt = &we_then[0];
+    match case_stmt {
+        Stmt::Case { sel, items, .. } => {
+            match sel {
+                Expr::Ident(s) => assert_eq!(s, "rd"),
+                other => panic!("expected Ident(rd), got {:?}", other),
+            }
+            assert_eq!(items.len(), 2); // 2'd0 and 2'd1
+        }
+        other => panic!("expected Stmt::Case inside if(we), got {:?}", other),
+    }
+}

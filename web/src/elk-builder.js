@@ -99,8 +99,18 @@ function collectExprIdents(expr) {
 /** Expr を表示用の文字列に変換する（定数ノードのラベル用）。 */
 function exprToString(expr) {
   if (!expr) return ''
-  if (expr.t === 'Ident' || expr.t === 'Lit' || expr.t === 'Raw') return String(expr.v)
-  return ''
+  switch (expr.t) {
+    case 'Ident':
+    case 'Lit':
+    case 'Raw':    return String(expr.v)
+    case 'Unary':  return `${expr.v.op}${exprToString(expr.v.operand)}`
+    case 'Binary': {
+      const l = exprToString(expr.v.lhs)
+      const r = exprToString(expr.v.rhs)
+      return (l && r) ? `${l}${expr.v.op}${r}` : (l || r)
+    }
+    default:       return ''
+  }
 }
 
 /**
@@ -215,6 +225,42 @@ function detectSyncReset(body, sig) {
     if (collectExprIdents(thenRhs).length > 0) continue   // 定数でなければスキップ
 
     return { sel, thenRhs, elseBody: stmt.v.else_ }
+  }
+  return null
+}
+
+/**
+ * body 内のトップレベル Case 文から、sig を駆動する最初の Case を検索する。
+ *
+ * 見つかった場合:
+ *   { sel: Expr, items: [{pattern, rhs}], defaultRhs: Expr|null }
+ * 見つからない場合: null
+ */
+function detectCaseMux(body, sig) {
+  for (const stmt of (body ?? [])) {
+    if (stmt.t !== 'Case') continue
+
+    const items = []
+    for (const item of stmt.v.items) {
+      let rhs = null
+      for (const s of item.stmts) {
+        if ((s.t === 'NbAssign' || s.t === 'BAssign') && s.v.lhs === sig) {
+          rhs = s.v.rhs; break
+        }
+      }
+      if (rhs !== null) items.push({ pattern: item.pattern, rhs })
+    }
+
+    let defaultRhs = null
+    for (const s of stmt.v.default_) {
+      if ((s.t === 'NbAssign' || s.t === 'BAssign') && s.v.lhs === sig) {
+        defaultRhs = s.v.rhs; break
+      }
+    }
+
+    if (items.length > 0 || defaultRhs !== null) {
+      return { sel: stmt.v.sel, items, defaultRhs }
+    }
   }
   return null
 }
@@ -382,6 +428,82 @@ export function buildElkGraph(tree, moduleIdx = 0) {
     return outPid
   }
 
+  /**
+   * Case 文を多入力 MUX ノードに変換して children へ追加する。
+   *
+   * レイアウト:
+   *   WEST  ... case items のアイテムごとの入力ポート（パターン文字列をラベルに）
+   *   SOUTH ... case セレクタ (S)
+   *   EAST  ... 出力ポート（信号名をラベルに）
+   *
+   * @param {string} muxId    - ノード ID
+   * @param {object} caseInfo - detectCaseMux の戻り値
+   * @param {string} sig      - 駆動される信号名
+   * @returns {string}         出力ポート ID（呼び出し元が tap / edges.push に使う）
+   */
+  function buildCaseMuxNode(muxId, caseInfo, sig) {
+    const selPid = `${muxId}.sel`
+    const outPid = `${muxId}.out`
+
+    // セレクタ信号を SOUTH へ接続
+    for (const selSig of collectExprIdents(caseInfo.sel)) {
+      tap(selSig, muxId, selPid, 'sink')
+    }
+
+    // 入力ポート: case items + default（sig が駆動されるアイテムのみ）
+    const allItems = [
+      ...caseInfo.items.map(it => ({ label: it.pattern, rhs: it.rhs })),
+      ...(caseInfo.defaultRhs !== null ? [{ label: 'def', rhs: caseInfo.defaultRhs }] : []),
+    ]
+
+    const ports = []
+    for (let k = 0; k < allItems.length; k++) {
+      const { label, rhs } = allItems[k]
+      const inPid = `${muxId}.in${k}`
+      ports.push({
+        id: inPid,
+        labels: [{ text: label }],
+        layoutOptions: { 'port.side': 'WEST' },
+      })
+
+      const rhsSigs = collectExprIdents(rhs)
+      if (rhsSigs.length > 0) {
+        // RHS が信号参照を含む → 各信号をシンクとして接続
+        for (const s of rhsSigs) tap(s, muxId, inPid, 'sink')
+      } else {
+        // 純定数 → 定数ノードを生成
+        const constStr = exprToString(rhs) || "'0"
+        makeConst(constStr, inPid)
+      }
+    }
+
+    ports.push({
+      id: selPid,
+      labels: [{ text: 'S' }],
+      layoutOptions: { 'port.side': 'SOUTH' },
+    })
+    ports.push({
+      id: outPid,
+      labels: [{ text: sig }],
+      layoutOptions: { 'port.side': 'EAST' },
+    })
+
+    const muxLabels = [{ text: 'MUX' }, { text: sig }]
+    children.push({
+      id: muxId,
+      width:  calcNodeWidth(ports, muxLabels, 44),
+      height: Math.max(allItems.length * 22 + 32, 60),
+      labels: muxLabels,
+      ports,
+      layoutOptions: {
+        'portConstraints':          'FIXED_SIDE',
+        'elk.nodeLabels.placement': 'INSIDE V_TOP H_CENTER',
+      },
+    })
+
+    return outPid
+  }
+
   // ─── 外部ポートノード ─────────────────────────────────────────
   for (const port of mod.ports) {
     const nid      = `ext.${port.name}`
@@ -462,10 +584,19 @@ export function buildElkGraph(tree, moduleIdx = 0) {
         const qPid   = `${regId}.Q`
         const clkPid = `${regId}.CLK`
 
-        // sync reset パターンを検出（async reset がある場合は不適用）
-        const syncRst = !always.reset ? detectSyncReset(filteredBody, sig) : null
+        // Case MUX パターンを検出（async reset 除去済み body を対象）
+        const caseInfo = detectCaseMux(filteredBody, sig)
 
-        if (syncRst) {
+        // sync reset パターンを検出（async reset がある場合・Case MUX 検出時は不適用）
+        const syncRst = (!always.reset && !caseInfo) ? detectSyncReset(filteredBody, sig) : null
+
+        if (caseInfo) {
+          // ── Case MUX → DFF.D ────────────────────────────────
+          const muxId  = `ff_comb.${i}.${sig}`
+          const outPid = buildCaseMuxNode(muxId, caseInfo, sig)
+          edges.push({ id: `e${eid++}`, sources: [outPid], targets: [dPid] })
+
+        } else if (syncRst) {
           // ── sync reset: srst を SEL とする MUX ノード ────────
           // srst=1 → リセット値(定数)   srst=0 → 通常データ
           const muxId  = `ff_comb.${i}.${sig}`
@@ -580,43 +711,57 @@ export function buildElkGraph(tree, moduleIdx = 0) {
       }
 
     } else {
-      // ── Comb / Latch: 従来どおり1ノード ──────────────────────
-      const nid   = `always.${i}`
-      const ports = []
-
-      for (const sig of (always.read_signals ?? [])) {
-        const pid = `${nid}.in.${sig}`
-        ports.push({
-          id: pid,
-          labels:        [{ text: sig }],
-          layoutOptions: { 'port.side': 'WEST' },
-        })
-        tap(sig, nid, pid, 'sink')
-      }
+      // ── Comb / Latch: 信号ごとにノードを分割 ──────────────────
+      // case 文 → Case MUX ノード、それ以外 → 依存信号ベースの COMB/LATCH ノード
+      const body      = always.body ?? []
+      const kindLabel = always.kind === 'Latch' ? 'LATCH' : 'COMB'
 
       for (const sig of always.driven_signals) {
-        const pid = `${nid}.out.${sig}`
-        ports.push({
-          id: pid,
-          labels:        [{ text: sig }],
-          layoutOptions: { 'port.side': 'EAST' },
-        })
-        tap(sig, nid, pid, 'source')
-      }
+        const caseInfo = detectCaseMux(body, sig)
 
-      const kindLabel  = always.kind === 'Comb' ? 'COMB' : 'LATCH'
-      const kindLabels = [{ text: kindLabel }]
-      children.push({
-        id:     nid,
-        width:  calcNodeWidth(ports, kindLabels, 44),
-        height: Math.max(60, ports.length * 20 + 24),
-        labels: kindLabels,
-        ports,
-        layoutOptions: {
-          'portConstraints':          'FIXED_SIDE',
-          'elk.nodeLabels.placement': 'INSIDE V_CENTER H_CENTER',
-        },
-      })
+        if (caseInfo) {
+          // ── Case MUX ──────────────────────────────────────────
+          const muxId  = `always.${i}.${sig}`
+          const outPid = buildCaseMuxNode(muxId, caseInfo, sig)
+          tap(sig, muxId, outPid, 'source')
+
+        } else {
+          // ── 依存信号ベースの COMB/LATCH ノード（per-signal）──
+          const nid       = `always.${i}.${sig}`
+          const outPid    = `${nid}.out`
+          const combPorts = []
+
+          const deps = extractDepsPerSignal(body, [sig]).get(sig) ?? new Set()
+          for (const inSig of deps) {
+            const pid = `${nid}.in.${inSig}`
+            combPorts.push({
+              id:            pid,
+              labels:        [{ text: inSig }],
+              layoutOptions: { 'port.side': 'WEST' },
+            })
+            tap(inSig, nid, pid, 'sink')
+          }
+          combPorts.push({
+            id:            outPid,
+            labels:        [{ text: sig }],
+            layoutOptions: { 'port.side': 'EAST' },
+          })
+          tap(sig, nid, outPid, 'source')
+
+          const combLabels = [{ text: sig }, { text: kindLabel }]
+          children.push({
+            id:     nid,
+            width:  calcNodeWidth(combPorts, combLabels, 44),
+            height: Math.max(40, combPorts.length * 20 + 24),
+            labels: combLabels,
+            ports:  combPorts,
+            layoutOptions: {
+              'portConstraints':          'FIXED_SIDE',
+              'elk.nodeLabels.placement': 'INSIDE V_TOP H_CENTER',
+            },
+          })
+        }
+      }
     }
   })
 
