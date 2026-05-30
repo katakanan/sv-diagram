@@ -20,3 +20,10 @@ web/wasm/
 # OS
 .DS_Store
 Thumbs.db
+
+# シミュレーション生成物（iverilog / vvp の出力）
+# SV ソース・スクリプトはコミット対象、生成物は除外
+sim/counter_sim
+sim/*.vcd
+sim/*.lxt
+sim/*.fst
