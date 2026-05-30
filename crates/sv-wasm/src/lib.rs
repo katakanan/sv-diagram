@@ -17,3 +17,14 @@ pub fn lower_sv(source: &str) -> Result<String, JsValue> {
         .map(|tree| serde_json::to_string(&tree).expect("serialization failed"))
         .map_err(|e| JsValue::from_str(&e.to_string()))
 }
+
+/// VCD テキストを VcdData の JSON 文字列に変換する
+///
+/// 成功時: VcdData の JSON 文字列
+/// 失敗時: JsValue::from_str(エラーメッセージ)
+#[wasm_bindgen]
+pub fn parse_vcd(vcd_text: &str) -> Result<String, JsValue> {
+    vcd_parser::parse_vcd(vcd_text)
+        .map(|data| serde_json::to_string(&data).expect("serialization failed"))
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
