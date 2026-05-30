@@ -450,31 +450,58 @@ export function buildElkGraph(tree, moduleIdx = 0) {
       tap(selSig, muxId, selPid, 'sink')
     }
 
-    // 入力ポート: case items + default（sig が駆動されるアイテムのみ）
+    // 入力ポート:
+    //   - 信号参照 → 全caseアイテムを通じてユニーク化（同じ信号が複数caseに現れてもポートは1つ）
+    //               ALU例 (a+b, a-b...) の重複エッジを防ぐ
+    //   - 純定数   → caseアイテムごとに1ポート（case構造を保持）
+    //               ctrl_unit例 (全RHSが定数) のcase値ラベルを正しく表示する
     const allItems = [
       ...caseInfo.items.map(it => ({ label: it.pattern, rhs: it.rhs })),
       ...(caseInfo.defaultRhs !== null ? [{ label: 'def', rhs: caseInfo.defaultRhs }] : []),
     ]
 
+    // 信号: ユニーク化（重複排除）、定数: per-case-item
+    const uniqueSigs  = []        // [sigName, ...]
+    const seenSigs    = new Set()
+    const constItems  = []        // [{ label, constStr }, ...] (dedup なし)
+
+    for (const { label, rhs } of allItems) {
+      const rhsSigs = collectExprIdents(rhs)
+      if (rhsSigs.length > 0) {
+        // 信号参照あり → ユニーク信号を収集
+        for (const s of rhsSigs) {
+          if (!seenSigs.has(s)) { seenSigs.add(s); uniqueSigs.push(s) }
+        }
+      } else {
+        // 純定数 → caseアイテムごとに1エントリ（dedup しない）
+        const constStr = exprToString(rhs) || "'0"
+        constItems.push({ label, constStr })
+      }
+    }
+
     const ports = []
-    for (let k = 0; k < allItems.length; k++) {
-      const { label, rhs } = allItems[k]
-      const inPid = `${muxId}.in${k}`
+    let portIdx = 0
+
+    // 信号ポート: ユニーク信号ごとに1ポート（信号名をラベルに）
+    for (const s of uniqueSigs) {
+      const inPid = `${muxId}.in${portIdx++}`
+      ports.push({
+        id: inPid,
+        labels: [{ text: s }],
+        layoutOptions: { 'port.side': 'WEST' },
+      })
+      tap(s, muxId, inPid, 'sink')
+    }
+
+    // 定数ポート: caseアイテムごとに1ポート（caseラベルをポートラベルに）
+    for (const { label, constStr } of constItems) {
+      const inPid = `${muxId}.in${portIdx++}`
       ports.push({
         id: inPid,
         labels: [{ text: label }],
         layoutOptions: { 'port.side': 'WEST' },
       })
-
-      const rhsSigs = collectExprIdents(rhs)
-      if (rhsSigs.length > 0) {
-        // RHS が信号参照を含む → 各信号をシンクとして接続
-        for (const s of rhsSigs) tap(s, muxId, inPid, 'sink')
-      } else {
-        // 純定数 → 定数ノードを生成
-        const constStr = exprToString(rhs) || "'0"
-        makeConst(constStr, inPid)
-      }
+      makeConst(constStr, inPid)
     }
 
     ports.push({
@@ -488,11 +515,12 @@ export function buildElkGraph(tree, moduleIdx = 0) {
       layoutOptions: { 'port.side': 'EAST' },
     })
 
+    const totalInPorts = uniqueSigs.length + constItems.length
     const muxLabels = [{ text: 'MUX' }, { text: sig }]
     const node = {
       id: muxId,
       width:  calcNodeWidth(ports, muxLabels, 44),
-      height: Math.max(allItems.length * 22 + 32, 60),
+      height: Math.max(totalInPorts * 22 + 32, 60),
       labels: muxLabels,
       ports,
       layoutOptions: {
@@ -716,7 +744,7 @@ export function buildElkGraph(tree, moduleIdx = 0) {
           layoutOptions: {
             'elk.algorithm':    'layered',
             'elk.direction':    'RIGHT',
-            'elk.padding':      '[top=16,left=16,bottom=16,right=16]',
+            'elk.padding':      '[top=24,left=24,bottom=24,right=24]',
             'elk.spacing.nodeNode': '20',
             'elk.layered.spacing.nodeNodeBetweenLayers': '20',
             'elk.hierarchyHandling': 'INCLUDE_CHILDREN',
@@ -726,10 +754,13 @@ export function buildElkGraph(tree, moduleIdx = 0) {
       }
 
     } else {
-      // ── Comb / Latch: 信号ごとにノードを分割 ──────────────────
+      // ── Comb / Latch: 信号ごとにノードを分割してコンパウンドでグループ化 ──
       // case 文 → Case MUX ノード、それ以外 → 依存信号ベースの COMB/LATCH ノード
-      const body      = always.body ?? []
-      const kindLabel = always.kind === 'Latch' ? 'LATCH' : 'COMB'
+      // always_ff と同様に group_comb.${i} コンパウンドノードで包む
+      const body         = always.body ?? []
+      const kindLabel    = always.kind === 'Latch' ? 'LATCH' : 'COMB'
+      const groupLabel   = always.kind === 'Latch' ? 'always_latch' : 'always_comb'
+      const groupChildren = []   // コンパウンドの子ノード（root には push しない）
 
       for (const sig of always.driven_signals) {
         const caseInfo = detectCaseMux(body, sig)
@@ -738,8 +769,8 @@ export function buildElkGraph(tree, moduleIdx = 0) {
           // ── Case MUX ──────────────────────────────────────────
           const muxId  = `always.${i}.${sig}`
           const { node: muxNode, outPid } = buildCaseMuxNode(muxId, caseInfo, sig)
-          children.push(muxNode)
-          tap(sig, muxId, outPid, 'source')
+          groupChildren.push(muxNode)           // コンパウンド内へ
+          tap(sig, muxId, outPid, 'source')     // 外部エッジは root に残る
 
         } else {
           // ── 依存信号ベースの COMB/LATCH ノード（per-signal）──
@@ -765,7 +796,7 @@ export function buildElkGraph(tree, moduleIdx = 0) {
           tap(sig, nid, outPid, 'source')
 
           const combLabels = [{ text: sig }, { text: kindLabel }]
-          children.push({
+          groupChildren.push({
             id:     nid,
             width:  calcNodeWidth(combPorts, combLabels, 44),
             height: Math.max(40, combPorts.length * 20 + 24),
@@ -777,6 +808,26 @@ export function buildElkGraph(tree, moduleIdx = 0) {
             },
           })
         }
+      }
+
+      // 子ノードが 1 つ以上あればコンパウンドノードとして包む
+      // 外部エッジは root の edges[] に登録済みのため内部エッジは不要
+      if (groupChildren.length > 0) {
+        children.push({
+          id:       `group_comb.${i}`,
+          labels:   [{ text: groupLabel }],
+          children: groupChildren,
+          edges:    [],
+          layoutOptions: {
+            'elk.algorithm':    'layered',
+            'elk.direction':    'RIGHT',
+            'elk.padding':      '[top=24,left=24,bottom=24,right=24]',
+            'elk.spacing.nodeNode': '20',
+            'elk.layered.spacing.nodeNodeBetweenLayers': '20',
+            'elk.hierarchyHandling': 'INCLUDE_CHILDREN',
+            'portConstraints':  'FREE',
+          },
+        })
       }
     }
   })
@@ -860,10 +911,10 @@ export function buildElkGraph(tree, moduleIdx = 0) {
       'elk.hierarchyHandling': 'INCLUDE_CHILDREN',
       'elk.layered.spacing.nodeNodeBetweenLayers': '60',
       'elk.spacing.nodeNode': '48',
-      'elk.spacing.edgeNode': '32',
-      'elk.spacing.edgeEdge': '20',
-      'elk.layered.spacing.edgeNodeBetweenLayers': '36',
-      'elk.layered.spacing.edgeEdgeBetweenLayers': '20',
+      'elk.spacing.edgeNode': '44',
+      'elk.spacing.edgeEdge': '28',
+      'elk.layered.spacing.edgeNodeBetweenLayers': '48',
+      'elk.layered.spacing.edgeEdgeBetweenLayers': '28',
       'elk.layered.nodePlacement.strategy': 'NETWORK_SIMPLEX',
       'elk.layered.crossingMinimization.strategy': 'LAYER_SWEEP',
       'elk.edgeRouting': 'ORTHOGONAL',

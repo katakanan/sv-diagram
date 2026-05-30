@@ -386,7 +386,21 @@ function renderProps(kind, id, rows) {
 
 /** グループノード ID からプロパティ行を返す */
 function getGroupProps(groupId) {
-  // groupId = "group.0.r0" → i=0, sig="r0"
+  if (groupId.startsWith('group_comb.')) {
+    // always_comb / always_latch グループ: group_comb.${i}
+    const i  = parseInt(groupId.slice('group_comb.'.length))
+    const mod = currentTree?.modules[currentModuleIdx]
+    const ab  = mod?.always_blocks[i]
+    if (!ab) return { kind: 'Comb Group', rows: [['id', groupId]] }
+    const kind = ab.kind === 'Latch' ? 'Latch Group' : 'Comb Group'
+    const rows = [
+      ['type',   `always_${ab.kind.toLowerCase()}`],
+      ['drives', ab.driven_signals.join(', ')],
+    ]
+    return { kind, rows }
+  }
+
+  // always_ff グループ: group.${i}.${sig}
   const key  = groupId.slice('group.'.length)
   const dotI = key.indexOf('.')
   const i    = parseInt(key.slice(0, dotI))
@@ -591,22 +605,34 @@ function selectNode(nodeId) {
   }
 
   // ── グループノード選択: 内部ノードをすべて選択した場合と同じ動作 ──
-  if (selectedNodeId.startsWith('group.')) {
-    const key    = selectedNodeId.slice('group.'.length)   // e.g. "0.r0"
-    const combId = `ff_comb.${key}`
-    const regId  = `ff_reg.${key}`
-
-    // グループ背景・内部ノードをハイライト
+  if (selectedNodeId.startsWith('group.') || selectedNodeId.startsWith('group_comb.')) {
+    // グループ背景をハイライト
     diagramWrap.querySelector(`.group-bg-item[data-id="${selectedNodeId}"]`)?.classList.add('selected')
-    diagramWrap.querySelector(`.node[data-id="${combId}"]`)?.classList.add('selected')
-    diagramWrap.querySelector(`.node[data-id="${regId}"]`)?.classList.add('selected')
 
-    // 内部 2 ノードの全ポートに繋がるエッジをハイライト
+    // 内部子ノードを特定してハイライト
+    let childIds = []
+    if (selectedNodeId.startsWith('group_comb.')) {
+      // always_comb/latch: group_comb.${i} → always.${i}.* の全ノード
+      const i      = selectedNodeId.slice('group_comb.'.length)
+      const prefix = `always.${i}.`
+      childIds = (currentLayout?.children ?? [])
+        .filter(c => c.id.startsWith(prefix))
+        .map(c => c.id)
+    } else {
+      // always_ff: group.${i}.${sig} → ff_comb.${key} + ff_reg.${key}
+      const key = selectedNodeId.slice('group.'.length)
+      childIds  = [`ff_comb.${key}`, `ff_reg.${key}`]
+    }
+
+    for (const cid of childIds) {
+      diagramWrap.querySelector(`.node[data-id="${cid}"]`)?.classList.add('selected')
+    }
+
+    // 全子ノードの全ポートに繋がるエッジをハイライト
     const nodes   = currentLayout?.children ?? []
-    const portIds = [
-      ...(nodes.find(c => c.id === combId)?.ports?.map(p => p.id) ?? []),
-      ...(nodes.find(c => c.id === regId)?.ports?.map(p => p.id)  ?? []),
-    ]
+    const portIds = childIds.flatMap(cid =>
+      nodes.find(c => c.id === cid)?.ports?.map(p => p.id) ?? []
+    )
     highlightEdgesForPorts(portIds)
 
     const { kind, rows } = getGroupProps(selectedNodeId)
