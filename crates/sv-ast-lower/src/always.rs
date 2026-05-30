@@ -235,100 +235,100 @@ fn lower_body(
 ) -> Vec<Stmt> {
     use sv_parser::unwrap_locate;
 
-    // ─ 全 ConditionalStatement と代入文を (offset, node) で収集 ──────
-    let mut cond_items: Vec<(usize, usize)> = Vec::new(); // (start, end_hint)
-    let mut nb_assigns: Vec<(usize, &sv_parser::NonblockingAssignment)> = Vec::new();
-    let mut b_assigns:  Vec<(usize, &sv_parser::BlockingAssignment)>    = Vec::new();
+    // ─ ConditionalStatement と CaseStatementNormal 両方のスパンを収集 ─
+    // これらが「exclusion zone」となり、内部の代入文をトップレベルとみなさない
+    let mut excl_spans: Vec<(usize, usize)> = Vec::new();
 
-    // 全 CS のオフセットを先に把握する（包含判定用）
     for node in always {
         if let RefNode::ConditionalStatement(cs) = node {
             if let Some(loc) = unwrap_locate!(cs) {
-                // end_hint: CS 内の最大 offset を後で更新する仮値
-                cond_items.push((loc.offset, loc.offset));
-            }
-        }
-    }
-
-    // 各 CS の「スパン末尾」を、その CS に含まれる最大トークン位置から推定する
-    let mut cond_spans: Vec<(usize, usize)> = Vec::new(); // (start, end_exclusive)
-    {
-        // CS 開始位置をソートして管理
-        let mut cs_starts: Vec<usize> = cond_items.iter().map(|(s, _)| *s).collect();
-        cs_starts.sort();
-
-        // DFS で各 CS の中にあるトークンを調べてスパンを計算する
-        // 簡便のため: 各 CS のスパン = start ～ (次の CS start の直前 or always 末尾)
-        // これは近似だが DFS 順で問題になるケースが少ない
-        for node in always {
-            if let RefNode::ConditionalStatement(cs) = node {
-                if let Some(loc) = unwrap_locate!(cs) {
-                    let cs_start = loc.offset;
-                    // CS 内の全トークン末尾 = max(offset + len)
-                    let mut max_end = cs_start + loc.len;
-                    for sub in cs {
-                        if let Some(sub_loc) = unwrap_locate!(sub) {
-                            let end = sub_loc.offset + sub_loc.len;
-                            if end > max_end { max_end = end; }
-                        }
+                let mut max_end = loc.offset + loc.len;
+                for sub in cs {
+                    if let Some(sl) = unwrap_locate!(sub) {
+                        let e = sl.offset + sl.len;
+                        if e > max_end { max_end = e; }
                     }
-                    cond_spans.push((cs_start, max_end));
                 }
+                excl_spans.push((loc.offset, max_end));
+            }
+        } else if let RefNode::CaseStatementNormal(cs) = node {
+            if let Some(loc) = unwrap_locate!(cs) {
+                let mut max_end = loc.offset + loc.len;
+                for sub in cs {
+                    if let Some(sl) = unwrap_locate!(sub) {
+                        let e = sl.offset + sl.len;
+                        if e > max_end { max_end = e; }
+                    }
+                }
+                excl_spans.push((loc.offset, max_end));
             }
         }
     }
 
-    // ─ 代入文を収集 ──────────────────────────────────────────────────
-    for node in always {
-        if let RefNode::NonblockingAssignment(nba) = &node {
-            if let Some(loc) = unwrap_locate!(*nba) {
-                nb_assigns.push((loc.offset, *nba));
-            }
-        }
-        if let RefNode::BlockingAssignment(ba) = &node {
-            if let Some(loc) = unwrap_locate!(*ba) {
-                b_assigns.push((loc.offset, *ba));
-            }
-        }
-    }
-
-    // ─ 包含チェック: あるオフセットが別の CS スパン内にあるか ────────
-    let inside_any_cs = |off: usize, self_start: Option<usize>| -> bool {
-        cond_spans.iter().any(|(cs_s, cs_e)| {
-            if let Some(ss) = self_start {
-                if *cs_s == ss { return false; } // 自分自身のスパンは除外
-            }
-            off >= *cs_s && off < *cs_e
+    // ─ 包含チェック ─────────────────────────────────────────────────
+    let inside_any = |off: usize, self_start: Option<usize>| -> bool {
+        excl_spans.iter().any(|(s, e)| {
+            if let Some(ss) = self_start { if *s == ss { return false; } }
+            off >= *s && off < *e
         })
     };
 
-    // ─ トップレベルの CS を特定（他の CS に含まれないもの）──────────
-    let top_cs_starts: Vec<usize> = cond_spans.iter()
-        .filter(|(s, _)| !inside_any_cs(*s, Some(*s)))
+    // ─ トップレベルの制御構造（他のスパン内に含まれないもの）────────
+    let top_starts: Vec<usize> = excl_spans.iter()
+        .filter(|(s, _)| !inside_any(*s, Some(*s)))
         .map(|(s, _)| *s)
         .collect();
 
-    // ─ トップレベルの代入（CS の外側）─────────────────────────────
+    // ─ 代入文を収集（top-level のみ）─────────────────────────────
+    let mut nb_assigns: Vec<(usize, &sv_parser::NonblockingAssignment)> = Vec::new();
+    let mut b_assigns:  Vec<(usize, &sv_parser::BlockingAssignment)>    = Vec::new();
+
+    for node in always {
+        if let RefNode::NonblockingAssignment(nba) = &node {
+            if let Some(loc) = unwrap_locate!(*nba) { nb_assigns.push((loc.offset, *nba)); }
+        }
+        if let RefNode::BlockingAssignment(ba) = &node {
+            if let Some(loc) = unwrap_locate!(*ba) { b_assigns.push((loc.offset, *ba)); }
+        }
+    }
+
     let top_nb: Vec<&sv_parser::NonblockingAssignment> = nb_assigns.iter()
-        .filter(|(off, _)| !inside_any_cs(*off, None))
+        .filter(|(off, _)| !inside_any(*off, None))
         .map(|(_, nba)| *nba)
         .collect();
     let top_b: Vec<&sv_parser::BlockingAssignment> = b_assigns.iter()
-        .filter(|(off, _)| !inside_any_cs(*off, None))
+        .filter(|(off, _)| !inside_any(*off, None))
         .map(|(_, ba)| *ba)
         .collect();
 
     // ─ 結果を組み立て ───────────────────────────────────────────────
     let mut stmts: Vec<Stmt> = Vec::new();
 
-    // トップレベル CS を変換
-    for cs_start in &top_cs_starts {
-        // AlwaysConstruct DFS から該当 CS を再取得
+    // トップレベル制御構造を変換（offset の昇順に処理）
+    let mut sorted_starts = top_starts.clone();
+    sorted_starts.sort();
+
+    for start in &sorted_starts {
+        let mut found = false;
+        // ConditionalStatement を探す
         for node in always {
+            if found { break; }
             if let RefNode::ConditionalStatement(cs) = node {
                 if let Some(loc) = unwrap_locate!(cs) {
-                    if loc.offset == *cs_start {
-                        stmts.push(lower_cond(cs, tree, source, &cond_spans, kind));
+                    if loc.offset == *start {
+                        stmts.push(lower_cond(cs, tree, source, &excl_spans, kind));
+                        found = true;
+                    }
+                }
+            }
+        }
+        if found { continue; }
+        // CaseStatementNormal を探す
+        for node in always {
+            if let RefNode::CaseStatementNormal(cs) = node {
+                if let Some(loc) = unwrap_locate!(cs) {
+                    if loc.offset == *start {
+                        stmts.push(lower_case_stmt(cs, tree, source, kind));
                         break;
                     }
                 }
@@ -371,34 +371,34 @@ fn lower_cond(
     let else_off = find_else_offset(cs, tree);
 
     // ─ この CS 内の代入 / 子 CS を収集 ────────────────────────────
-    let mut nb_here: Vec<(usize, &sv_parser::NonblockingAssignment)> = Vec::new();
-    let mut b_here:  Vec<(usize, &sv_parser::BlockingAssignment)>    = Vec::new();
-    let mut child_cs: Vec<(usize, &sv_parser::ConditionalStatement)> = Vec::new();
+    let mut nb_here:     Vec<(usize, &sv_parser::NonblockingAssignment)> = Vec::new();
+    let mut b_here:      Vec<(usize, &sv_parser::BlockingAssignment)>    = Vec::new();
+    let mut child_cs:    Vec<(usize, &sv_parser::ConditionalStatement)>  = Vec::new();
+    let mut child_cases: Vec<(usize, &sv_parser::CaseStatementNormal)>   = Vec::new();
 
     for node in cs {
         match &node {
             RefNode::NonblockingAssignment(nba) => {
-                if let Some(loc) = unwrap_locate!(*nba) {
-                    nb_here.push((loc.offset, *nba));
-                }
+                if let Some(loc) = unwrap_locate!(*nba) { nb_here.push((loc.offset, *nba)); }
             }
             RefNode::BlockingAssignment(ba) => {
-                if let Some(loc) = unwrap_locate!(*ba) {
-                    b_here.push((loc.offset, *ba));
-                }
+                if let Some(loc) = unwrap_locate!(*ba) { b_here.push((loc.offset, *ba)); }
             }
             RefNode::ConditionalStatement(child) => {
                 if let Some(loc) = unwrap_locate!(*child) {
-                    if loc.offset != cs_start {
-                        child_cs.push((loc.offset, *child));
-                    }
+                    if loc.offset != cs_start { child_cs.push((loc.offset, *child)); }
+                }
+            }
+            RefNode::CaseStatementNormal(child_case) => {
+                if let Some(loc) = unwrap_locate!(*child_case) {
+                    child_cases.push((loc.offset, *child_case));
                 }
             }
             _ => {}
         }
     }
 
-    // 直接の子 CS (子 CS に含まれないもの)
+    // 直接の子 CS（他の子 CS スパン内に含まれないもの）
     let direct_child_cs: Vec<_> = child_cs.iter()
         .filter(|(off, _)| {
             !child_cs.iter().any(|(cs_s, _)| {
@@ -408,31 +408,42 @@ fn lower_cond(
         })
         .collect();
 
+    // 直接の子 Case（子 CS スパン内に含まれないもの）
+    let direct_child_cases: Vec<_> = child_cases.iter()
+        .filter(|(off, _)| {
+            !direct_child_cs.iter().any(|(cs_s, _)| {
+                let cs_e = all_spans.iter().find(|(s, _)| *s == *cs_s).map(|(_, e)| *e).unwrap_or(*cs_s);
+                *off >= *cs_s && *off < cs_e
+            })
+        })
+        .collect();
+
     // ─ then / else に振り分け ──────────────────────────────────────
     let split = |off: usize| -> bool {
         else_off.map(|e| off < e).unwrap_or(true)
     };
 
+    // 子 CS および子 Case のいずれかに含まれるオフセットかチェック
+    let in_child = |off: usize| -> bool {
+        direct_child_cs.iter().any(|(cs_s, _)| {
+            let cs_e = all_spans.iter().find(|(s, _)| *s == *cs_s).map(|(_, e)| *e).unwrap_or(*cs_s);
+            off >= *cs_s && off < cs_e
+        }) || direct_child_cases.iter().any(|(case_s, _)| {
+            let case_e = all_spans.iter().find(|(s, _)| *s == *case_s).map(|(_, e)| *e).unwrap_or(*case_s);
+            off >= *case_s && off < case_e
+        })
+    };
+
     let mut then_: Vec<Stmt> = Vec::new();
     let mut else_: Vec<Stmt> = Vec::new();
 
-    // 代入
     for (off, nba) in &nb_here {
-        // 子 CS に含まれていたら直接追加しない
-        let in_child = direct_child_cs.iter().any(|(cs_s, _)| {
-            let cs_e = all_spans.iter().find(|(s, _)| s == cs_s).map(|(_, e)| *e).unwrap_or(*cs_s);
-            *off >= *cs_s && *off < cs_e
-        });
-        if in_child { continue; }
+        if in_child(*off) { continue; }
         let stmt = lower_nb_assign(*nba, tree, source);
         if split(*off) { then_.push(stmt); } else { else_.push(stmt); }
     }
     for (off, ba) in &b_here {
-        let in_child = direct_child_cs.iter().any(|(cs_s, _)| {
-            let cs_e = all_spans.iter().find(|(s, _)| s == cs_s).map(|(_, e)| *e).unwrap_or(*cs_s);
-            *off >= *cs_s && *off < cs_e
-        });
-        if in_child { continue; }
+        if in_child(*off) { continue; }
         let stmt = lower_b_assign(*ba, tree, source);
         if split(*off) { then_.push(stmt); } else { else_.push(stmt); }
     }
@@ -440,6 +451,12 @@ fn lower_cond(
     // 子 CS
     for (off, child) in &direct_child_cs {
         let stmt = lower_cond(child, tree, source, all_spans, kind);
+        if split(*off) { then_.push(stmt); } else { else_.push(stmt); }
+    }
+
+    // 子 Case
+    for (off, child_case) in &direct_child_cases {
+        let stmt = lower_case_stmt(child_case, tree, source, kind);
         if split(*off) { then_.push(stmt); } else { else_.push(stmt); }
     }
 
@@ -496,6 +513,102 @@ fn find_else_offset(
         }
     }
     None
+}
+
+// ─── CaseStatementNormal → Stmt::Case ────────────────────────────────────
+
+/// CaseStatementNormal (case/casez/casex) を Stmt::Case に変換する。
+fn lower_case_stmt(
+    cs: &sv_parser::CaseStatementNormal,
+    tree: &SyntaxTree,
+    source: &str,
+    kind: &AlwaysKind,
+) -> Stmt {
+    use sv_parser::unwrap_locate;
+    use crate::types::CaseItem as CiType;
+
+    // ─ セレクタ式 ─────────────────────────────────────────────────
+    let sel = {
+        let mut min = usize::MAX;
+        let mut max = 0usize;
+        for node in cs {
+            if let RefNode::CaseExpression(ce) = node {
+                for sub in ce {
+                    if let Some(loc) = unwrap_locate!(sub) {
+                        if loc.offset < min { min = loc.offset; }
+                        let e = loc.offset + loc.len;
+                        if e > max { max = e; }
+                    }
+                }
+                break; // 最初の CaseExpression のみ
+            }
+        }
+        if min < usize::MAX {
+            source.get(min..max)
+                .map(|s| build_expr_simple(s.trim()))
+                .unwrap_or(Expr::Raw("?".to_string()))
+        } else {
+            Expr::Raw("?".to_string())
+        }
+    };
+
+    // ─ アイテムを収集 ─────────────────────────────────────────────
+    let mut items:    Vec<CiType> = Vec::new();
+    let mut default_: Vec<Stmt>   = Vec::new();
+
+    for node in cs {
+        if let RefNode::CaseItemNondefault(ci) = node {
+            // パターン文字列（カンマ区切りのアイテム式を結合）
+            let pattern = {
+                let mut parts = Vec::new();
+                for sub in ci {
+                    if let RefNode::CaseItemExpression(expr) = sub {
+                        let mut mn = usize::MAX;
+                        let mut mx = 0usize;
+                        for ssub in expr {
+                            if let Some(loc) = unwrap_locate!(ssub) {
+                                if loc.offset < mn { mn = loc.offset; }
+                                let e = loc.offset + loc.len;
+                                if e > mx { mx = e; }
+                            }
+                        }
+                        if mn < usize::MAX {
+                            if let Some(s) = source.get(mn..mx) {
+                                parts.push(s.trim().to_string());
+                            }
+                        }
+                    }
+                }
+                if parts.is_empty() { String::from("?") } else { parts.join(", ") }
+            };
+            let stmts = collect_item_stmts(ci, tree, source, kind);
+            items.push(CiType { pattern, stmts });
+        } else if let RefNode::CaseItemDefault(ci) = node {
+            default_ = collect_item_stmts(ci, tree, source, kind);
+        }
+    }
+
+    Stmt::Case { sel, items, default_ }
+}
+
+/// case アイテム内の NbAssign/BAssign を再帰的に収集する。
+fn collect_item_stmts<'a, I>(item: I, tree: &SyntaxTree, source: &str, _kind: &AlwaysKind) -> Vec<Stmt>
+where
+    I: IntoIterator<Item = RefNode<'a>>,
+{
+    let mut stmts = Vec::new();
+    for node in item {
+        match node {
+            RefNode::NonblockingAssignment(nba) => {
+                stmts.push(lower_nb_assign(nba, tree, source));
+            }
+            RefNode::BlockingAssignment(ba) => {
+                stmts.push(lower_b_assign(ba, tree, source));
+            }
+            _ => {}
+        }
+    }
+    stmts
 }
 
 // ─── 個別代入の変換 ───────────────────────────────────────────────────────

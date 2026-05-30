@@ -188,7 +188,34 @@ export function renderToSvg(layout) {
   const allSegs     = collectAllSegments(layout.edges ?? [])
   const crossingMap = buildCrossingMap(allSegs)
 
-  // ─── エッジ（ノードの背面に描画）────────────────────────────
+  // ─── 描画順: グループ背景 → エッジ → ノード ────────────────────
+  // グループ背景（最背面）
+  const groupBgGroup = el('g', { class: 'group-bgs' })
+  for (const node of layout.children ?? []) {
+    if (!node._isGroup) continue
+    const nx = node.x ?? 0
+    const ny = node.y ?? 0
+    const nw = node.width  ?? 0
+    const nh = node.height ?? 0
+    // クリック可能な g 要素でラップ（data-id でグループ選択に使用）
+    const gg = el('g', { class: 'group-bg-item', 'data-id': node.id })
+    gg.appendChild(el('rect', {
+      x: nx, y: ny, width: nw, height: nh,
+      fill: '#f5f0ff', stroke: '#9977cc',
+      'stroke-width': 1, 'stroke-dasharray': '4 3',
+      rx: 5, opacity: 0.7,
+      class: 'group-rect',
+    }))
+    if (node.labels?.[0]) {
+      gg.appendChild(text(node.labels[0].text, nx + nw - 4, ny + 11, {
+        size: 9, anchor: 'end', fill: '#7755aa',
+      }))
+    }
+    groupBgGroup.appendChild(gg)
+  }
+  content.appendChild(groupBgGroup)
+
+  // エッジ（グループ背景の前面、ノードの背面）
   const edgeGroup = el('g', { class: 'edges' })
 
   for (const [ei, edge] of (layout.edges ?? []).entries()) {
@@ -239,10 +266,11 @@ export function renderToSvg(layout) {
 
   content.appendChild(edgeGroup)
 
-  // ─── ノード ──────────────────────────────────────────────────
+  // ─── ノード（最前面）────────────────────────────────────────
   const nodeGroup = el('g', { class: 'nodes' })
 
   for (const node of layout.children ?? []) {
+    if (node._isGroup) continue   // グループ背景は上で描画済み
     const nx = node.x ?? 0
     const ny = node.y ?? 0
     const nw = node.width  ?? 0

@@ -9,237 +9,294 @@ import { verilog }                from '@codemirror/legacy-modes/mode/verilog'
 // ─── デフォルトの SV ソース ──────────────────────────────────────
 const DEFAULT_SV = `\
 // ================================================================
-// assign サンプル集
+// シングルサイクル CPU サンプル
 //
-// mux2       : 単純な assign / 三項演算子
-// priority4  : ネスト三項演算子（優先エンコーダ）
-// ================================================================
-
-// ─── 2入力マルチプレクサ ─────────────────────────────────────
-module mux2 #(
-  parameter int unsigned WIDTH = 8
-)(
-  input  var logic             sel,
-  input  var logic [WIDTH-1:0] a,
-  input  var logic [WIDTH-1:0] b,
-  output var logic [WIDTH-1:0] y,
-  output var logic [WIDTH-1:0] y_and,
-  output var logic [WIDTH-1:0] y_or
-);
-  // 三項演算子による選択
-  assign y     = sel ? a : b;
-  // ビット演算
-  assign y_and = a & b;
-  assign y_or  = a | b;
-endmodule
-
-// ─── 4入力優先エンコーダ ──────────────────────────────────────
-module priority4 (
-  input  var logic [3:0] req,
-  output var logic [1:0] grant,
-  output var logic       valid
-);
-  // ネストした三項演算子
-  assign grant = req[3] ? 2'd3 :
-                 req[2] ? 2'd2 :
-                 req[1] ? 2'd1 :
-                          2'd0;
-  // リダクション演算子
-  assign valid = |req;
-endmodule
-
-// ================================================================
-// 3ステージ パイプライン サンプル
+// 構成:
+//   cpu_top   : CPU トップ（PC・データパス）
+//     u_imem  : instr_mem  (命令メモリ / ROM)
+//     u_ctrl  : ctrl_unit  (制御ユニット / 命令デコード)
+//     u_alu   : alu        (算術論理演算ユニット)
+//     u_rf    : reg_file   (レジスタファイル 4本 × 8bit)
 //
-// 階層:
-//   pipeline_top
-//     u_ctrl   : pipe_ctrl   (パイプライン制御)
-//     u_stage1 : pipe_stage  (第1ステージ)
-//     u_stage2 : pipe_stage  (第2ステージ)
-//     u_stage3 : pipe_stage  (第3ステージ)
+// 命令フォーマット (16bit):
+//   [15:12] opcode   4bit
+//   [11:10] rd       2bit  書き込み先レジスタ
+//   [9:8]   rs1      2bit  ソースレジスタ1
+//   [7:6]   rs2      2bit  ソースレジスタ2
+//   [5:0]   imm6     6bit  即値 / 分岐オフセット
+//
+// サポート命令:
+//   ADD  (4'h0)  rd = rs1 + rs2
+//   SUB  (4'h1)  rd = rs1 - rs2
+//   AND  (4'h2)  rd = rs1 & rs2
+//   OR   (4'h3)  rd = rs1 | rs2
+//   ADDI (4'h4)  rd = rs1 + imm6
+//   BEQ  (4'h5)  if (rs1 == rs2) PC += imm6
 // ================================================================
 
-// ─── パイプラインステージ（1段分）──────────────────────────────
-module pipe_stage #(
-  parameter int unsigned WIDTH = 8
+// ─── 命令メモリ (ROM) ─────────────────────────────────────────────
+module instr_mem #(
+  parameter int unsigned AW    = 8,
+  parameter int unsigned DEPTH = 256
 )(
-  input  var logic             clk,
-  input  var logic             rst_n,
-  input  var logic [WIDTH-1:0] din,
-  input  var logic             valid_in,
-  output var logic [WIDTH-1:0] dout,
-  output var logic             valid_out
+  input  var logic [AW-1:0] addr,
+  output var logic [15:0]   rdata
 );
-  logic [WIDTH-1:0] processed;
-  logic [WIDTH-1:0] data_reg;
-  logic             valid_reg;
+  logic [15:0] mem [0:DEPTH-1];
 
   always_comb begin
-    processed = din + 1;
+    rdata = mem[addr];
   end
-
-  always_ff @(posedge clk or negedge rst_n) begin
-    if (!rst_n) begin
-      data_reg  <= '0;
-      valid_reg <= 1'b0;
-    end else begin
-      data_reg  <= processed;
-      valid_reg <= valid_in;
-    end
-  end
-
-  assign dout      = data_reg;
-  assign valid_out = valid_reg;
 endmodule
 
-// ─── パイプラインコントローラ ────────────────────────────────
-module pipe_ctrl (
-  input  var logic clk,
-  input  var logic rst_n,
-  input  var logic start,
-  input  var logic last_valid,
-  output var logic valid_out,
-  output var logic busy
+// ─── 制御ユニット ────────────────────────────────────────────────
+module ctrl_unit (
+  input  var logic [3:0] opcode,
+  output var logic [1:0] alu_op,
+  output var logic       reg_write,
+  output var logic       alu_src,
+  output var logic       branch
 );
-  logic valid_r;
-  logic busy_r;
-
-  always_ff @(posedge clk or negedge rst_n) begin
-    if (!rst_n) begin
-      valid_r <= 1'b0;
-      busy_r  <= 1'b0;
-    end else begin
-      valid_r <= start;
-      busy_r  <= start & ~last_valid;
-    end
+  always_comb begin
+    case (opcode)
+      4'h0: begin  // ADD
+        alu_op    = 2'b00;
+        reg_write = 1'b1;
+        alu_src   = 1'b0;
+        branch    = 1'b0;
+      end
+      4'h1: begin  // SUB
+        alu_op    = 2'b01;
+        reg_write = 1'b1;
+        alu_src   = 1'b0;
+        branch    = 1'b0;
+      end
+      4'h2: begin  // AND
+        alu_op    = 2'b10;
+        reg_write = 1'b1;
+        alu_src   = 1'b0;
+        branch    = 1'b0;
+      end
+      4'h3: begin  // OR
+        alu_op    = 2'b11;
+        reg_write = 1'b1;
+        alu_src   = 1'b0;
+        branch    = 1'b0;
+      end
+      4'h4: begin  // ADDI
+        alu_op    = 2'b00;
+        reg_write = 1'b1;
+        alu_src   = 1'b1;
+        branch    = 1'b0;
+      end
+      4'h5: begin  // BEQ
+        alu_op    = 2'b01;
+        reg_write = 1'b0;
+        alu_src   = 1'b0;
+        branch    = 1'b1;
+      end
+      default: begin
+        alu_op    = 2'b00;
+        reg_write = 1'b0;
+        alu_src   = 1'b0;
+        branch    = 1'b0;
+      end
+    endcase
   end
-
-  assign valid_out = valid_r;
-  assign busy      = busy_r;
 endmodule
 
-// ─── トップ: 3ステージパイプライン ──────────────────────────
-module pipeline_top #(
-  parameter int unsigned DATA_W  = 8,
-  parameter int unsigned N_STAGE = 3
+// ─── ALU ─────────────────────────────────────────────────────────
+module alu #(
+  parameter int unsigned W = 8
 )(
-  input  var logic              clk,
-  input  var logic              rst_n,
-  input  var logic [DATA_W-1:0] data_in,
-  input  var logic              start,
-  output var logic [DATA_W-1:0] data_out,
-  output var logic              valid_out,
-  output var logic              busy
+  input  var logic [W-1:0] a,
+  input  var logic [W-1:0] b,
+  input  var logic [1:0]   op,
+  output var logic [W-1:0] result,
+  output var logic         zero
 );
-  logic [DATA_W-1:0] s1_data;
-  logic [DATA_W-1:0] s2_data;
-  logic              ctrl_valid;
-  logic              s1_valid;
-  logic              s2_valid;
-
-  pipe_ctrl u_ctrl (
-    .clk        (clk),
-    .rst_n      (rst_n),
-    .start      (start),
-    .last_valid (s2_valid),
-    .valid_out  (ctrl_valid),
-    .busy       (busy)
-  );
-
-  pipe_stage #(
-    .WIDTH(DATA_W)
-  ) u_stage1 (
-    .clk       (clk),
-    .rst_n     (rst_n),
-    .din       (data_in),
-    .valid_in  (ctrl_valid),
-    .dout      (s1_data),
-    .valid_out (s1_valid)
-  );
-
-  pipe_stage #(
-    .WIDTH(DATA_W)
-  ) u_stage2 (
-    .clk       (clk),
-    .rst_n     (rst_n),
-    .din       (s1_data),
-    .valid_in  (s1_valid),
-    .dout      (s2_data),
-    .valid_out (s2_valid)
-  );
-
-  pipe_stage #(
-    .WIDTH(DATA_W)
-  ) u_stage3 (
-    .clk       (clk),
-    .rst_n     (rst_n),
-    .din       (s2_data),
-    .valid_in  (s2_valid),
-    .dout      (data_out),
-    .valid_out (valid_out)
-  );
-endmodule
-
-// ================================================================
-// リセットサンプル
-//
-// reset_demo:
-//   q_async : 非同期リセット FF（negedge arst_n が感度リストに含まれる）
-//   q_sync  : 同期リセット FF（clk のみが感度リスト、if 文でリセット処理）
-// ================================================================
-
-module reset_demo (
-  input  var logic clk,
-  input  var logic arst_n,    // 非同期リセット（アクティブロー）
-  input  var logic srst,      // 同期リセット（アクティブハイ）
-  input  var logic d_async,
-  input  var logic d_sync,
-  output var logic q_async,
-  output var logic q_sync
-);
-  // 非同期リセット: negedge arst_n を感度リストに含める
-  always_ff @(posedge clk or negedge arst_n) begin
-    if (!arst_n) begin
-      q_async <= 1'b0;
-    end else begin
-      q_async <= d_async;
-    end
-  end
-
-  // 同期リセット: 感度リストは posedge clk のみ
-  //              リセット条件は always_ff 内の if 文で処理
-  always_ff @(posedge clk) begin
-    if (srst) begin
-      q_sync <= 1'b0;
-    end else begin
-      q_sync <= d_sync;
-    end
+  always_comb begin
+    case (op)
+      2'b00:   result = a + b;
+      2'b01:   result = a - b;
+      2'b10:   result = a & b;
+      2'b11:   result = a | b;
+      default: result = '0;
+    endcase
+    zero = (result == '0);
   end
 endmodule
 
-// ================================================================
-// 定数 assign サンプル
-//
-// const_demo:
-//   assign hoge = 1'd0  のような純定数 assign を定数ノードで表示するデモ
-// ================================================================
-
-module const_demo (
-  output var logic [7:0] zero_out,
-  output var logic [7:0] const_out,
-  output var logic       tie_hi,
-  output var logic       tie_lo,
-  input  var logic [7:0] passthru_in,
-  output var logic [7:0] passthru_out
+// ─── レジスタファイル ─────────────────────────────────────────────
+module reg_file #(
+  parameter int unsigned W = 8
+)(
+  input  var logic         clk,
+  input  var logic         rst_n,
+  input  var logic [1:0]   rs1,
+  input  var logic [1:0]   rs2,
+  input  var logic [1:0]   rd,
+  input  var logic [W-1:0] wd,
+  input  var logic         we,
+  output var logic [W-1:0] rv1,
+  output var logic [W-1:0] rv2
 );
-  // 純定数 assign: RHS がリテラルのみ → 定数ノードとエッジで表示
-  assign zero_out   = 8'h00;
-  assign const_out  = 8'hAB;
-  assign tie_hi     = 1'b1;
-  assign tie_lo     = 1'b0;
+  logic [W-1:0] r0;
+  logic [W-1:0] r1;
+  logic [W-1:0] r2;
+  logic [W-1:0] r3;
 
-  // 信号 assign: 従来どおり assign ノード
-  assign passthru_out = passthru_in;
+  // 書き込みポート（非同期リセット）
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      r0 <= '0;
+      r1 <= '0;
+      r2 <= '0;
+      r3 <= '0;
+    end else begin
+      if (we) begin
+        case (rd)
+          2'd0: r0 <= wd;
+          2'd1: r1 <= wd;
+          2'd2: r2 <= wd;
+          2'd3: r3 <= wd;
+          default: r0 <= '0;
+        endcase
+      end
+    end
+  end
+
+  // 読み出しポート（組み合わせ）
+  always_comb begin
+    case (rs1)
+      2'd0: rv1 = r0;
+      2'd1: rv1 = r1;
+      2'd2: rv1 = r2;
+      2'd3: rv1 = r3;
+      default: rv1 = '0;
+    endcase
+    case (rs2)
+      2'd0: rv2 = r0;
+      2'd1: rv2 = r1;
+      2'd2: rv2 = r2;
+      2'd3: rv2 = r3;
+      default: rv2 = '0;
+    endcase
+  end
+endmodule
+
+// ─── CPU トップ ──────────────────────────────────────────────────
+module cpu_top #(
+  parameter int unsigned W = 8
+)(
+  input  var logic         clk,
+  input  var logic         rst_n,
+  output var logic [W-1:0] result_out
+);
+  // ── PC レジスタ ──────────────────────────────────────────────
+  logic [W-1:0] pc;
+  logic [W-1:0] pc_next;
+
+  // ── フェッチ済み命令 ─────────────────────────────────────────
+  logic [15:0] instr;
+
+  // ── 命令フィールド ───────────────────────────────────────────
+  logic [3:0] opcode;
+  logic [1:0] rd;
+  logic [1:0] rs1;
+  logic [1:0] rs2;
+  logic [5:0] imm6;
+
+  // ── データパス信号 ───────────────────────────────────────────
+  logic [W-1:0] rv1;        // レジスタ読み出し1
+  logic [W-1:0] rv2;        // レジスタ読み出し2
+  logic [W-1:0] alu_b;      // ALU 入力B（レジスタ or 即値）
+  logic [W-1:0] alu_result; // ALU 演算結果
+  logic         alu_zero;   // ALU ゼロフラグ
+
+  // ── 制御信号 ─────────────────────────────────────────────────
+  logic [1:0] alu_op;
+  logic       reg_write;
+  logic       alu_src;   // 0: rv2, 1: imm6
+  logic       branch;
+
+  // PC レジスタ（非同期リセット）
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      pc <= '0;
+    end else begin
+      pc <= pc_next;
+    end
+  end
+
+  // 命令デコード（フィールド分割）
+  always_comb begin
+    opcode = instr[15:12];
+    rd     = instr[11:10];
+    rs1    = instr[9:8];
+    rs2    = instr[7:6];
+    imm6   = instr[5:0];
+  end
+
+  // ALU 入力B セレクタ（レジスタ or 即値）
+  always_comb begin
+    if (alu_src) begin
+      alu_b = {2'b0, imm6};
+    end else begin
+      alu_b = rv2;
+    end
+  end
+
+  // 次 PC 計算（分岐 or +1 インクリメント）
+  always_comb begin
+    if (branch & alu_zero) begin
+      pc_next = pc + {2'b0, imm6};
+    end else begin
+      pc_next = pc + 1;
+    end
+  end
+
+  assign result_out = alu_result;
+
+  // 命令メモリ: pc → addr → rdata → instr
+  instr_mem #(
+    .AW(W)
+  ) u_imem (
+    .addr  (pc),
+    .rdata (instr)
+  );
+
+  ctrl_unit u_ctrl (
+    .opcode    (opcode),
+    .alu_op    (alu_op),
+    .reg_write (reg_write),
+    .alu_src   (alu_src),
+    .branch    (branch)
+  );
+
+  reg_file #(
+    .W(W)
+  ) u_rf (
+    .clk   (clk),
+    .rst_n (rst_n),
+    .rs1   (rs1),
+    .rs2   (rs2),
+    .rd    (rd),
+    .wd    (alu_result),
+    .we    (reg_write),
+    .rv1   (rv1),
+    .rv2   (rv2)
+  );
+
+  alu #(
+    .W(W)
+  ) u_alu (
+    .a      (rv1),
+    .b      (alu_b),
+    .op     (alu_op),
+    .result (alu_result),
+    .zero   (alu_zero)
+  );
 endmodule
 `
 
@@ -325,6 +382,30 @@ function renderProps(kind, id, rows) {
        <span class="props-val">${esc(v)}</span>
      </div>`
   ).join('')
+}
+
+/** グループノード ID からプロパティ行を返す */
+function getGroupProps(groupId) {
+  // groupId = "group.0.r0" → i=0, sig="r0"
+  const key  = groupId.slice('group.'.length)
+  const dotI = key.indexOf('.')
+  const i    = parseInt(key.slice(0, dotI))
+  const sig  = key.slice(dotI + 1)
+  const mod  = currentTree?.modules[currentModuleIdx]
+  const ab   = mod?.always_blocks[i]
+  if (!ab) return { kind: 'FF Group', rows: [['id', groupId]] }
+
+  const rows = [['signal', sig], ['type', 'FF Group (NEXT + DFF)']]
+  if (ab.clock) {
+    rows.push(['CLK', `${ab.clock.edge === 'Posedge' ? '↑' : '↓'} ${ab.clock.signal_name}`])
+  }
+  if (ab.reset) {
+    rows.push(['RST', `${ab.reset.signal_name} (active-${ab.reset.active_low ? 'low' : 'high'})`])
+  }
+  if (ab.driven_signals?.length > 1) {
+    rows.push(['block drives', ab.driven_signals.join(', ')])
+  }
+  return { kind: 'FF Group', rows }
 }
 
 /** ノード ID からプロパティ行を返す */
@@ -462,14 +543,45 @@ function updateBackBtn() {
   }
 }
 
+/**
+ * エディタを指定モジュールの宣言行にスクロールする。
+ * CodeMirror 6 の EditorView.scrollIntoView effect を使用。
+ * @param {string} moduleName
+ */
+function scrollEditorToModule(moduleName) {
+  if (!moduleName) return
+  const text = editor.state.doc.toString()
+  // "module <name>" を行頭近くで探す（空白・コメント後を考慮）
+  const re  = new RegExp(`(?:^|\\n)[^\\n]*\\bmodule\\s+${moduleName}\\b`)
+  const m   = re.exec(text)
+  if (!m) return
+  // マッチ文字列の中の "module" キーワードの絶対オフセット
+  const pos = m.index + m[0].indexOf('module')
+  editor.dispatch({
+    effects: EditorView.scrollIntoView(pos, { y: 'start', yMargin: 24 }),
+  })
+}
+
 // ─── ノード・エッジ選択 ───────────────────────────────────────
 let selectedNodeId = null
 let selectedEdgeId = null
+
+/** ポート ID 一覧から接続エッジをすべてハイライトする */
+function highlightEdgesForPorts(portIds) {
+  if (!currentLayout || portIds.length === 0) return
+  const portMap = buildPortEdgeMap(currentLayout)
+  for (const pid of portIds) {
+    for (const eid of portMap.get(pid) ?? []) {
+      diagramWrap.querySelector(`.edge[data-id="${eid}"]`)?.classList.add('selected')
+    }
+  }
+}
 
 function selectNode(nodeId) {
   // 前の選択をすべて解除
   diagramWrap.querySelectorAll('.node.selected').forEach(n => n.classList.remove('selected'))
   diagramWrap.querySelectorAll('.edge.selected').forEach(e => e.classList.remove('selected'))
+  diagramWrap.querySelectorAll('.group-bg-item.selected').forEach(g => g.classList.remove('selected'))
   selectedNodeId = nodeId ?? null
   selectedEdgeId = null
 
@@ -478,49 +590,73 @@ function selectNode(nodeId) {
     return
   }
 
-  // ノードをハイライト
+  // ── グループノード選択: 内部ノードをすべて選択した場合と同じ動作 ──
+  if (selectedNodeId.startsWith('group.')) {
+    const key    = selectedNodeId.slice('group.'.length)   // e.g. "0.r0"
+    const combId = `ff_comb.${key}`
+    const regId  = `ff_reg.${key}`
+
+    // グループ背景・内部ノードをハイライト
+    diagramWrap.querySelector(`.group-bg-item[data-id="${selectedNodeId}"]`)?.classList.add('selected')
+    diagramWrap.querySelector(`.node[data-id="${combId}"]`)?.classList.add('selected')
+    diagramWrap.querySelector(`.node[data-id="${regId}"]`)?.classList.add('selected')
+
+    // 内部 2 ノードの全ポートに繋がるエッジをハイライト
+    const nodes   = currentLayout?.children ?? []
+    const portIds = [
+      ...(nodes.find(c => c.id === combId)?.ports?.map(p => p.id) ?? []),
+      ...(nodes.find(c => c.id === regId)?.ports?.map(p => p.id)  ?? []),
+    ]
+    highlightEdgesForPorts(portIds)
+
+    const { kind, rows } = getGroupProps(selectedNodeId)
+    renderProps(kind, selectedNodeId, rows)
+    return
+  }
+
+  // ── 通常ノード選択 ───────────────────────────────────────────────
   diagramWrap.querySelector(`.node[data-id="${selectedNodeId}"]`)?.classList.add('selected')
 
-  // プロパティパネル更新
   const { kind, rows } = getNodeProps(selectedNodeId)
   renderProps(kind, selectedNodeId, rows)
 
-  // 特定ノードは接続エッジも全てハイライト
-  if (currentLayout) {
-    const portMap    = buildPortEdgeMap(currentLayout)
-    let   portIds    = []
-
-    if (selectedNodeId.startsWith('ext.')) {
-      portIds = [`${selectedNodeId}.p`]
-    } else if (selectedNodeId.startsWith('const.')) {
-      portIds = [`${selectedNodeId}.out`]
-    } else if (selectedNodeId.startsWith('ff_comb.')) {
-      // ff_comb の全ポート（WEST 入力 + EAST 出力）のエッジをハイライト
-      portIds = (currentLayout.children ?? [])
-        .find(c => c.id === selectedNodeId)
-        ?.ports?.map(p => p.id) ?? []
-    } else if (selectedNodeId.startsWith('ff_reg.')) {
-      // ff_reg の全ポートのエッジをハイライト
-      portIds = (currentLayout.children ?? [])
-        .find(c => c.id === selectedNodeId)
-        ?.ports?.map(p => p.id) ?? []
-    }
-
-    for (const pid of portIds) {
-      for (const eid of portMap.get(pid) ?? []) {
-        diagramWrap.querySelector(`.edge[data-id="${eid}"]`)?.classList.add('selected')
-      }
-    }
+  let portIds = []
+  if (selectedNodeId.startsWith('ext.')) {
+    portIds = [`${selectedNodeId}.p`]
+  } else if (selectedNodeId.startsWith('const.')) {
+    portIds = [`${selectedNodeId}.out`]
+  } else if (selectedNodeId.startsWith('ff_comb.') || selectedNodeId.startsWith('ff_reg.')) {
+    portIds = (currentLayout?.children ?? [])
+      .find(c => c.id === selectedNodeId)
+      ?.ports?.map(p => p.id) ?? []
   }
+  highlightEdgesForPorts(portIds)
 }
 
 function selectEdge(edgeId) {
   diagramWrap.querySelectorAll('.node.selected').forEach(n => n.classList.remove('selected'))
   diagramWrap.querySelectorAll('.edge.selected').forEach(e => e.classList.remove('selected'))
+  diagramWrap.querySelectorAll('.group-bg-item.selected').forEach(g => g.classList.remove('selected'))
   selectedNodeId = null
   selectedEdgeId = edgeId ?? null
+
   if (selectedEdgeId) {
-    diagramWrap.querySelector(`.edge[data-id="${selectedEdgeId}"]`)?.classList.add('selected')
+    // 選択エッジのソースポートを共有する全エッジをハイライト（分岐ワイヤー対応）
+    const portMap = buildPortEdgeMap(currentLayout)
+    const edge    = currentLayout?.edges?.find(e => e.id === selectedEdgeId)
+
+    const relatedIds = new Set([selectedEdgeId])
+    if (edge) {
+      for (const srcPid of edge.sources ?? []) {
+        for (const eid of portMap.get(srcPid) ?? []) {
+          relatedIds.add(eid)
+        }
+      }
+    }
+    for (const eid of relatedIds) {
+      diagramWrap.querySelector(`.edge[data-id="${eid}"]`)?.classList.add('selected')
+    }
+
     const { kind, rows } = getEdgeProps(selectedEdgeId)
     renderProps(kind, selectedEdgeId, rows)
   } else {
@@ -602,14 +738,20 @@ diagramWrap.addEventListener('wheel', e => {
 // ─── クリック: ノード・エッジ選択 ────────────────────────────
 diagramWrap.addEventListener('click', e => {
   if (panMoved) { panMoved = false; return }  // ドラッグ後のクリックは無視
-  const nodeEl = e.target.closest('.node')
-  const edgeEl = e.target.closest('.edge')
+  const nodeEl  = e.target.closest('.node')
+  const edgeEl  = e.target.closest('.edge')
+  const groupEl = e.target.closest('.group-bg-item')
   if (nodeEl) {
+    // 通常ノード（グループ内ノードを含む）が優先
     selectEdge(null)
     selectNode(nodeEl.dataset.id)
   } else if (edgeEl) {
     selectNode(null)
     selectEdge(edgeEl.dataset.id)
+  } else if (groupEl) {
+    // グループ背景のパディング領域をクリック
+    selectEdge(null)
+    selectNode(groupEl.dataset.id)
   } else {
     selectNode(null)
     selectEdge(null)
@@ -642,6 +784,7 @@ diagramWrap.addEventListener('dblclick', async e => {
   updateBackBtn()
   moduleSelect.value = String(targetIdx)
   await renderModule(targetIdx)
+  scrollEditorToModule(instance.module_name)
 })
 
 // ─── 戻るボタン: 上位階層へ ───────────────────────────────────
@@ -651,6 +794,7 @@ backBtn.addEventListener('click', async () => {
   updateBackBtn()
   moduleSelect.value = String(moduleIdx)
   await renderModule(moduleIdx)
+  scrollEditorToModule(currentTree.modules[moduleIdx].name)
 })
 
 // ─── WASM 初期化 ─────────────────────────────────────────────
@@ -665,6 +809,63 @@ function initWasm() {
   }
 }
 
+// ─── コンパウンドノード平坦化 ────────────────────────────────────
+
+/**
+ * ELK レイアウト結果のコンパウンドノード（children を持つノード）を平坦化する。
+ * - 子ノードの x/y を絶対座標に変換
+ * - コンパウンド内部エッジのセクション座標を絶対化して root edges に昇格
+ * - コンパウンドノード自体に _isGroup フラグを付与（背景描画用）
+ * @param {object} layout - elk.layout() の戻り値
+ * @returns {object}       平坦化済みレイアウト
+ */
+function flattenLayout(layout) {
+  const flatNodes = []
+  const flatEdges = [...(layout.edges ?? [])]
+
+  function flatten(container, ox, oy) {
+    for (const node of container.children ?? []) {
+      const ax = (node.x ?? 0) + ox
+      const ay = (node.y ?? 0) + oy
+
+      if (node.children?.length > 0) {
+        // コンパウンドノード → 背景グループとして追加
+        flatNodes.push({
+          ...node,
+          x: ax, y: ay,
+          children: undefined,
+          edges:    undefined,
+          _isGroup: true,
+        })
+        // 子ノードを再帰展開
+        flatten(node, ax, ay)
+        // 内部エッジをルート絶対座標に変換して追加
+        for (const edge of node.edges ?? []) {
+          flatEdges.push(offsetEdgeSections(edge, ax, ay))
+        }
+      } else {
+        flatNodes.push({ ...node, x: ax, y: ay })
+      }
+    }
+  }
+
+  flatten(layout, 0, 0)
+  return { ...layout, children: flatNodes, edges: flatEdges }
+}
+
+/** エッジセクションの全座標を (dx, dy) だけオフセットする */
+function offsetEdgeSections(edge, dx, dy) {
+  return {
+    ...edge,
+    sections: (edge.sections ?? []).map(sec => ({
+      ...sec,
+      startPoint: { x: sec.startPoint.x + dx, y: sec.startPoint.y + dy },
+      endPoint:   { x: sec.endPoint.x   + dx, y: sec.endPoint.y   + dy },
+      bendPoints: (sec.bendPoints ?? []).map(bp => ({ x: bp.x + dx, y: bp.y + dy })),
+    })),
+  }
+}
+
 // ─── モジュール単体レンダリング ─────────────────────────────────
 /** currentTree の moduleIdx 番目のモジュールをレイアウト→SVG描画する */
 async function renderModule(moduleIdx) {
@@ -675,9 +876,10 @@ async function renderModule(moduleIdx) {
   selectedEdgeId   = null
 
   try {
-    const elkGraph = buildElkGraph(currentTree, moduleIdx)
-    const layout   = await elk.layout(elkGraph)
-    currentLayout  = layout                  // ポート→エッジ逆引き用に保持
+    const elkGraph  = buildElkGraph(currentTree, moduleIdx)
+    const rawLayout = await elk.layout(elkGraph)
+    const layout    = flattenLayout(rawLayout)  // コンパウンドを平坦化
+    currentLayout  = layout                     // ポート→エッジ逆引き用に保持
     const svg      = renderToSvg(layout)
     diagramWrap.innerHTML = ''
     diagramWrap.appendChild(svg)
@@ -740,7 +942,9 @@ moduleSelect.addEventListener('change', async () => {
   // 手動でモジュールを切り替えたときはナビ履歴をリセット
   navStack = []
   updateBackBtn()
-  await renderModule(parseInt(moduleSelect.value, 10))
+  const idx = parseInt(moduleSelect.value, 10)
+  await renderModule(idx)
+  scrollEditorToModule(currentTree.modules[idx].name)
 })
 
 // 起動

@@ -151,6 +151,20 @@
       filter: drop-shadow(0 0 4px rgba(51,153,255,0.45));
     }
 
+    /* ── グループノード インタラクション ───────────────────── */
+    #diagram-wrap .group-bg-item { cursor: pointer; }
+    #diagram-wrap .group-bg-item:hover .group-rect {
+      stroke: #7755cc;
+      stroke-width: 2px;
+      opacity: 0.9;
+    }
+    #diagram-wrap .group-bg-item.selected .group-rect {
+      stroke: #ff8800;
+      stroke-width: 2px;
+      opacity: 1;
+      filter: drop-shadow(0 0 6px rgba(255,136,0,0.4));
+    }
+
     /* ── エッジ インタラクション ─────────────────────────── */
     #diagram-wrap .edge { cursor: pointer; }
 
