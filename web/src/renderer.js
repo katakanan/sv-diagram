@@ -197,17 +197,21 @@ export function renderToSvg(layout) {
     const ny = node.y ?? 0
     const nw = node.width  ?? 0
     const nh = node.height ?? 0
-    groupBgGroup.appendChild(el('rect', {
+    // クリック可能な g 要素でラップ（data-id でグループ選択に使用）
+    const gg = el('g', { class: 'group-bg-item', 'data-id': node.id })
+    gg.appendChild(el('rect', {
       x: nx, y: ny, width: nw, height: nh,
       fill: '#f5f0ff', stroke: '#9977cc',
       'stroke-width': 1, 'stroke-dasharray': '4 3',
       rx: 5, opacity: 0.7,
+      class: 'group-rect',
     }))
     if (node.labels?.[0]) {
-      groupBgGroup.appendChild(text(node.labels[0].text, nx + nw - 4, ny + 11, {
+      gg.appendChild(text(node.labels[0].text, nx + nw - 4, ny + 11, {
         size: 9, anchor: 'end', fill: '#7755aa',
       }))
     }
+    groupBgGroup.appendChild(gg)
   }
   content.appendChild(groupBgGroup)
 

@@ -384,6 +384,30 @@ function renderProps(kind, id, rows) {
   ).join('')
 }
 
+/** グループノード ID からプロパティ行を返す */
+function getGroupProps(groupId) {
+  // groupId = "group.0.r0" → i=0, sig="r0"
+  const key  = groupId.slice('group.'.length)
+  const dotI = key.indexOf('.')
+  const i    = parseInt(key.slice(0, dotI))
+  const sig  = key.slice(dotI + 1)
+  const mod  = currentTree?.modules[currentModuleIdx]
+  const ab   = mod?.always_blocks[i]
+  if (!ab) return { kind: 'FF Group', rows: [['id', groupId]] }
+
+  const rows = [['signal', sig], ['type', 'FF Group (NEXT + DFF)']]
+  if (ab.clock) {
+    rows.push(['CLK', `${ab.clock.edge === 'Posedge' ? '↑' : '↓'} ${ab.clock.signal_name}`])
+  }
+  if (ab.reset) {
+    rows.push(['RST', `${ab.reset.signal_name} (active-${ab.reset.active_low ? 'low' : 'high'})`])
+  }
+  if (ab.driven_signals?.length > 1) {
+    rows.push(['block drives', ab.driven_signals.join(', ')])
+  }
+  return { kind: 'FF Group', rows }
+}
+
 /** ノード ID からプロパティ行を返す */
 function getNodeProps(nodeId) {
   const mod = currentTree?.modules[currentModuleIdx]
@@ -542,10 +566,22 @@ function scrollEditorToModule(moduleName) {
 let selectedNodeId = null
 let selectedEdgeId = null
 
+/** ポート ID 一覧から接続エッジをすべてハイライトする */
+function highlightEdgesForPorts(portIds) {
+  if (!currentLayout || portIds.length === 0) return
+  const portMap = buildPortEdgeMap(currentLayout)
+  for (const pid of portIds) {
+    for (const eid of portMap.get(pid) ?? []) {
+      diagramWrap.querySelector(`.edge[data-id="${eid}"]`)?.classList.add('selected')
+    }
+  }
+}
+
 function selectNode(nodeId) {
   // 前の選択をすべて解除
   diagramWrap.querySelectorAll('.node.selected').forEach(n => n.classList.remove('selected'))
   diagramWrap.querySelectorAll('.edge.selected').forEach(e => e.classList.remove('selected'))
+  diagramWrap.querySelectorAll('.group-bg-item.selected').forEach(g => g.classList.remove('selected'))
   selectedNodeId = nodeId ?? null
   selectedEdgeId = null
 
@@ -554,49 +590,73 @@ function selectNode(nodeId) {
     return
   }
 
-  // ノードをハイライト
+  // ── グループノード選択: 内部ノードをすべて選択した場合と同じ動作 ──
+  if (selectedNodeId.startsWith('group.')) {
+    const key    = selectedNodeId.slice('group.'.length)   // e.g. "0.r0"
+    const combId = `ff_comb.${key}`
+    const regId  = `ff_reg.${key}`
+
+    // グループ背景・内部ノードをハイライト
+    diagramWrap.querySelector(`.group-bg-item[data-id="${selectedNodeId}"]`)?.classList.add('selected')
+    diagramWrap.querySelector(`.node[data-id="${combId}"]`)?.classList.add('selected')
+    diagramWrap.querySelector(`.node[data-id="${regId}"]`)?.classList.add('selected')
+
+    // 内部 2 ノードの全ポートに繋がるエッジをハイライト
+    const nodes   = currentLayout?.children ?? []
+    const portIds = [
+      ...(nodes.find(c => c.id === combId)?.ports?.map(p => p.id) ?? []),
+      ...(nodes.find(c => c.id === regId)?.ports?.map(p => p.id)  ?? []),
+    ]
+    highlightEdgesForPorts(portIds)
+
+    const { kind, rows } = getGroupProps(selectedNodeId)
+    renderProps(kind, selectedNodeId, rows)
+    return
+  }
+
+  // ── 通常ノード選択 ───────────────────────────────────────────────
   diagramWrap.querySelector(`.node[data-id="${selectedNodeId}"]`)?.classList.add('selected')
 
-  // プロパティパネル更新
   const { kind, rows } = getNodeProps(selectedNodeId)
   renderProps(kind, selectedNodeId, rows)
 
-  // 特定ノードは接続エッジも全てハイライト
-  if (currentLayout) {
-    const portMap    = buildPortEdgeMap(currentLayout)
-    let   portIds    = []
-
-    if (selectedNodeId.startsWith('ext.')) {
-      portIds = [`${selectedNodeId}.p`]
-    } else if (selectedNodeId.startsWith('const.')) {
-      portIds = [`${selectedNodeId}.out`]
-    } else if (selectedNodeId.startsWith('ff_comb.')) {
-      // ff_comb の全ポート（WEST 入力 + EAST 出力）のエッジをハイライト
-      portIds = (currentLayout.children ?? [])
-        .find(c => c.id === selectedNodeId)
-        ?.ports?.map(p => p.id) ?? []
-    } else if (selectedNodeId.startsWith('ff_reg.')) {
-      // ff_reg の全ポートのエッジをハイライト
-      portIds = (currentLayout.children ?? [])
-        .find(c => c.id === selectedNodeId)
-        ?.ports?.map(p => p.id) ?? []
-    }
-
-    for (const pid of portIds) {
-      for (const eid of portMap.get(pid) ?? []) {
-        diagramWrap.querySelector(`.edge[data-id="${eid}"]`)?.classList.add('selected')
-      }
-    }
+  let portIds = []
+  if (selectedNodeId.startsWith('ext.')) {
+    portIds = [`${selectedNodeId}.p`]
+  } else if (selectedNodeId.startsWith('const.')) {
+    portIds = [`${selectedNodeId}.out`]
+  } else if (selectedNodeId.startsWith('ff_comb.') || selectedNodeId.startsWith('ff_reg.')) {
+    portIds = (currentLayout?.children ?? [])
+      .find(c => c.id === selectedNodeId)
+      ?.ports?.map(p => p.id) ?? []
   }
+  highlightEdgesForPorts(portIds)
 }
 
 function selectEdge(edgeId) {
   diagramWrap.querySelectorAll('.node.selected').forEach(n => n.classList.remove('selected'))
   diagramWrap.querySelectorAll('.edge.selected').forEach(e => e.classList.remove('selected'))
+  diagramWrap.querySelectorAll('.group-bg-item.selected').forEach(g => g.classList.remove('selected'))
   selectedNodeId = null
   selectedEdgeId = edgeId ?? null
+
   if (selectedEdgeId) {
-    diagramWrap.querySelector(`.edge[data-id="${selectedEdgeId}"]`)?.classList.add('selected')
+    // 選択エッジのソースポートを共有する全エッジをハイライト（分岐ワイヤー対応）
+    const portMap = buildPortEdgeMap(currentLayout)
+    const edge    = currentLayout?.edges?.find(e => e.id === selectedEdgeId)
+
+    const relatedIds = new Set([selectedEdgeId])
+    if (edge) {
+      for (const srcPid of edge.sources ?? []) {
+        for (const eid of portMap.get(srcPid) ?? []) {
+          relatedIds.add(eid)
+        }
+      }
+    }
+    for (const eid of relatedIds) {
+      diagramWrap.querySelector(`.edge[data-id="${eid}"]`)?.classList.add('selected')
+    }
+
     const { kind, rows } = getEdgeProps(selectedEdgeId)
     renderProps(kind, selectedEdgeId, rows)
   } else {
@@ -678,14 +738,20 @@ diagramWrap.addEventListener('wheel', e => {
 // ─── クリック: ノード・エッジ選択 ────────────────────────────
 diagramWrap.addEventListener('click', e => {
   if (panMoved) { panMoved = false; return }  // ドラッグ後のクリックは無視
-  const nodeEl = e.target.closest('.node')
-  const edgeEl = e.target.closest('.edge')
+  const nodeEl  = e.target.closest('.node')
+  const edgeEl  = e.target.closest('.edge')
+  const groupEl = e.target.closest('.group-bg-item')
   if (nodeEl) {
+    // 通常ノード（グループ内ノードを含む）が優先
     selectEdge(null)
     selectNode(nodeEl.dataset.id)
   } else if (edgeEl) {
     selectNode(null)
     selectEdge(edgeEl.dataset.id)
+  } else if (groupEl) {
+    // グループ背景のパディング領域をクリック
+    selectEdge(null)
+    selectNode(groupEl.dataset.id)
   } else {
     selectNode(null)
     selectEdge(null)
