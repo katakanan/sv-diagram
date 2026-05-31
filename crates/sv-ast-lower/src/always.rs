@@ -1,42 +1,82 @@
-use sv_parser::{ModuleDeclarationAnsi, RefNode, SyntaxTree, unwrap_node};
+use sv_parser::{RefNode, SyntaxTree, unwrap_node};
 use crate::types::{AlwaysNode, AlwaysKind, ClockInfo, ResetInfo, EdgeKind, Expr, Stmt};
 use crate::module::get_str;
 
-pub fn lower_always_blocks(
-    m: &ModuleDeclarationAnsi,
+/// `ModuleDeclarationAnsi` と `ModuleDeclarationNonansi` の両方に対応できるよう
+/// HRTB (Higher-Rank Trait Bound) を使って汎用化している。
+pub fn lower_always_blocks<M>(
+    m: &M,
     tree: &SyntaxTree,
     source: &str,
-) -> Result<Vec<AlwaysNode>, Box<dyn std::error::Error>> {
+) -> Result<Vec<AlwaysNode>, Box<dyn std::error::Error>>
+where
+    for<'a> &'a M: IntoIterator<Item = RefNode<'a>>,
+{
     let mut always_blocks = Vec::new();
 
     for node in m {
-        if let RefNode::AlwaysConstruct(always) = node {
-            let kind = extract_always_kind(always, tree)?;
+        match node {
+            // ── always_ff / always_comb / always_latch / plain always ──
+            RefNode::AlwaysConstruct(always) => {
+                let kind = extract_always_kind(always, tree)?;
 
-            let (clock, reset) = if kind == AlwaysKind::Ff {
-                extract_clock_reset(always, tree)?
-            } else {
-                (None, None)
-            };
+                let (clock, reset) = if kind == AlwaysKind::Ff {
+                    extract_clock_reset(always, tree)?
+                } else {
+                    (None, None)
+                };
 
-            let driven_signals = extract_driven_signals(always, tree, &kind)?;
+                let driven_signals = extract_driven_signals(always, tree, &kind)?;
 
-            let clock_name = clock.as_ref().map(|c| c.signal_name.as_str());
-            let reset_name = reset.as_ref().map(|r| r.signal_name.as_str());
-            let read_signals = extract_read_signals(
-                always, tree, &driven_signals, clock_name, reset_name,
-            )?;
+                let clock_name = clock.as_ref().map(|c| c.signal_name.as_str());
+                let reset_name = reset.as_ref().map(|r| r.signal_name.as_str());
+                let read_signals = extract_read_signals(
+                    always, tree, &driven_signals, clock_name, reset_name,
+                )?;
 
-            let body = lower_body(always, tree, source, &kind);
+                let body = lower_body(always, tree, source, &kind);
 
-            always_blocks.push(AlwaysNode {
-                kind,
-                clock,
-                reset,
-                driven_signals,
-                read_signals,
-                body,
-            });
+                let half_period = if kind == AlwaysKind::ClkGen {
+                    extract_half_period(always, tree, source)
+                } else {
+                    None
+                };
+
+                let driver_value = if kind == AlwaysKind::DcDriver {
+                    extract_driver_value(always, tree, source)
+                } else {
+                    None
+                };
+
+                always_blocks.push(AlwaysNode {
+                    kind,
+                    clock,
+                    reset,
+                    driven_signals,
+                    read_signals,
+                    body,
+                    half_period,
+                    driver_value,
+                });
+            }
+
+            // ── initial begin ... end ──────────────────────────────────
+            RefNode::InitialConstruct(initial) => {
+                let driven_signals = extract_initial_driven(initial, tree)?;
+                let read_signals   = extract_initial_read(initial, tree, &driven_signals)?;
+                always_blocks.push(AlwaysNode {
+                    kind: AlwaysKind::Initial,
+                    clock:          None,
+                    reset:          None,
+                    driven_signals,
+                    read_signals,
+                    body:           vec![],
+                    half_period:    None,
+                    driver_value:   None,
+                });
+            }
+
+            _ => {}
         }
     }
 
@@ -57,12 +97,172 @@ fn extract_always_kind(
                     Some("always_ff")    => return Ok(AlwaysKind::Ff),
                     Some("always_comb")  => return Ok(AlwaysKind::Comb),
                     Some("always_latch") => return Ok(AlwaysKind::Latch),
+                    // plain `always` → DelayControl の有無とトグル演算子で分類
+                    Some("always")       => return Ok(detect_plain_always_kind(always, tree)),
                     _ => {}
                 }
             }
         }
     }
     Ok(AlwaysKind::Comb)
+}
+
+/// plain `always` ブロックの種別を判定する。
+///
+/// - `always #N sig = ~sig` (または `!sig`)  → ClkGen
+/// - `always #N sig = val`                    → DcDriver
+/// - それ以外                                 → Comb (フォールバック)
+fn detect_plain_always_kind(
+    always: &sv_parser::AlwaysConstruct,
+    tree: &SyntaxTree,
+) -> AlwaysKind {
+    use sv_parser::unwrap_locate;
+
+    // トグル演算子 (~ または !) が本体内に存在する → ClkGen
+    for node in always {
+        if let RefNode::UnaryOperator(uo) = node {
+            if let Some(loc) = unwrap_locate!(uo) {
+                if matches!(tree.get_str(loc), Some("~") | Some("!")) {
+                    return AlwaysKind::ClkGen;
+                }
+            }
+        }
+    }
+
+    // DelayControl が存在する → DcDriver
+    for node in always {
+        if let RefNode::DelayControl(_) = node {
+            return AlwaysKind::DcDriver;
+        }
+    }
+
+    AlwaysKind::Comb
+}
+
+/// `always #N` の N 部分を source から取得する。
+///
+/// DelayControl ノードのスパンを source から切り出し、先頭の `#` と
+/// 空白を除去して返す（例: "#5" → "5", "# 10" → "10"）。
+fn extract_half_period(
+    always: &sv_parser::AlwaysConstruct,
+    _tree: &SyntaxTree,
+    source: &str,
+) -> Option<String> {
+    use sv_parser::unwrap_locate;
+
+    for node in always {
+        if let RefNode::DelayControl(dc) = node {
+            let mut min_off = usize::MAX;
+            let mut max_end = 0usize;
+            for sub in dc {
+                if let Some(loc) = unwrap_locate!(sub) {
+                    if loc.offset < min_off { min_off = loc.offset; }
+                    let end = loc.offset + loc.len;
+                    if end > max_end { max_end = end; }
+                }
+            }
+            if min_off < usize::MAX {
+                if let Some(s) = source.get(min_off..max_end) {
+                    // "#5" や "# 10" から '#' と空白を除去
+                    let val = s.trim_start_matches('#').trim();
+                    if !val.is_empty() {
+                        return Some(val.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// `always #N sig = val` の val 部分を source から取得する。
+///
+/// BlockingAssignment 内の最初の Expression スパンを取得する。
+fn extract_driver_value(
+    always: &sv_parser::AlwaysConstruct,
+    _tree: &SyntaxTree,
+    source: &str,
+) -> Option<String> {
+    use sv_parser::unwrap_locate;
+
+    for node in always {
+        if let RefNode::BlockingAssignment(ba) = node {
+            let mut found_expr = false;
+            let mut min_off = usize::MAX;
+            let mut max_end = 0usize;
+
+            for sub in ba {
+                if let RefNode::Expression(_) = &sub { found_expr = true; }
+                if found_expr {
+                    if let Some(loc) = unwrap_locate!(sub.clone()) {
+                        if loc.offset < min_off { min_off = loc.offset; }
+                        let end = loc.offset + loc.len;
+                        if end > max_end { max_end = end; }
+                    }
+                }
+            }
+
+            if min_off < usize::MAX {
+                if let Some(s) = source.get(min_off..max_end) {
+                    let trimmed = s.trim().to_string();
+                    if !trimmed.is_empty() {
+                        return Some(trimmed);
+                    }
+                }
+            }
+            return None;
+        }
+    }
+    None
+}
+
+// ─── initial block の入出力抽出 ───────────────────────────────────────────
+
+/// `initial begin ... end` 内でブロッキング代入 (`=`) されている信号名を収集する。
+/// これが「出力」＝テストベンチが駆動する信号に相当する。
+fn extract_initial_driven(
+    initial: &sv_parser::InitialConstruct,
+    tree: &SyntaxTree,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let mut signals: Vec<String> = Vec::new();
+    for node in initial {
+        if let RefNode::BlockingAssignment(ba) = node {
+            if let Some(sig) = unwrap_node!(ba, SimpleIdentifier) {
+                if let Ok(name) = get_str(tree, sig) {
+                    if !signals.contains(&name) {
+                        signals.push(name);
+                    }
+                }
+            }
+        }
+    }
+    Ok(signals)
+}
+
+/// `initial begin ... end` 内で参照される信号名を収集する。
+/// ブロッキング代入の左辺（driven）は除外する。
+/// イベント制御 `@(posedge clk)` の信号や RHS・$monitor 引数などが対象。
+fn extract_initial_read(
+    initial: &sv_parser::InitialConstruct,
+    tree: &SyntaxTree,
+    driven: &[String],
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    use std::collections::HashSet;
+    let exclude: HashSet<&str> = driven.iter().map(String::as_str).collect();
+    let mut seen:    HashSet<String> = HashSet::new();
+    let mut signals: Vec<String>     = Vec::new();
+
+    for node in initial {
+        if let RefNode::SimpleIdentifier(_) = node {
+            if let Ok(name) = get_str(tree, node) {
+                if !exclude.contains(name.as_str()) && !seen.contains(&name) {
+                    seen.insert(name.clone());
+                    signals.push(name);
+                }
+            }
+        }
+    }
+    Ok(signals)
 }
 
 // ─── clock / reset ────────────────────────────────────────────────────────
@@ -168,7 +368,8 @@ fn extract_driven_signals(
                     }
                 }
             }
-            AlwaysKind::Comb | AlwaysKind::Latch => {
+            AlwaysKind::Comb | AlwaysKind::Latch
+            | AlwaysKind::ClkGen | AlwaysKind::DcDriver => {
                 if let RefNode::BlockingAssignment(ba) = node {
                     if let Some(sig) = unwrap_node!(ba, SimpleIdentifier) {
                         if let Ok(name) = get_str(tree, sig) {
@@ -179,6 +380,8 @@ fn extract_driven_signals(
                     }
                 }
             }
+            // Initial ブロックは AlwaysConstruct 経由では呼ばれない
+            AlwaysKind::Initial => {}
         }
     }
 

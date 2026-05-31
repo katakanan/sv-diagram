@@ -1,4 +1,4 @@
-use sv_parser::{ModuleDeclarationAnsi, RefNode, SyntaxTree, unwrap_node};
+use sv_parser::{ModuleDeclarationAnsi, ModuleDeclarationNonansi, RefNode, SyntaxTree, unwrap_node};
 use crate::types::ModuleNode;
 use crate::port::lower_ports;
 use crate::instance::lower_instances;
@@ -29,6 +29,35 @@ pub fn lower_module_ansi(
         assigns,
         always_blocks,
         generates: vec![],
+    }))
+}
+
+/// `module foo;` (括弧なしのノン ANSI 宣言) を処理する。
+/// テストベンチのように portless なモジュールを想定しており、
+/// ports / parameters は空リストを返す。
+/// signals / instances / always_blocks は ANSI と同じロジックで抽出する。
+pub fn lower_module_nonansi(
+    m: &ModuleDeclarationNonansi,
+    tree: &SyntaxTree,
+    source: &str,
+) -> Result<Option<ModuleNode>, Box<dyn std::error::Error>> {
+    let name_node = unwrap_node!(m, ModuleIdentifier)
+        .ok_or("missing ModuleIdentifier in nonansi module")?;
+    let name = get_str(tree, name_node)?;
+
+    let (signals, assigns) = lower_signals_and_assigns(m, tree, source)?;
+    let instances = lower_instances(m, tree, source)?;
+    let always_blocks = lower_always_blocks(m, tree, source)?;
+
+    Ok(Some(ModuleNode {
+        name,
+        ports:        vec![],
+        parameters:   vec![],
+        signals,
+        instances,
+        assigns,
+        always_blocks,
+        generates:    vec![],
     }))
 }
 

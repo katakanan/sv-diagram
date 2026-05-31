@@ -367,6 +367,49 @@ endmodule
     }
 }
 
+/// `module foo;` (括弧なし非 ANSI) でも初期化ブロックが取れるか
+#[test]
+fn test_nonansi_module_initial() {
+    let sv = r#"
+`timescale 1ns/1ps
+module tb;
+  logic clk   = 1'b0;
+  logic rst_n = 1'b0;
+
+  always #5 clk = ~clk;
+
+  initial begin
+    rst_n = 1'b0;
+    #10 rst_n = 1'b1;
+    #100 $finish;
+  end
+endmodule
+"#;
+    let tree = lower(sv, "tb.sv").unwrap();
+    // nonansi モジュールが認識されること
+    assert_eq!(tree.modules.len(), 1, "expected 1 module, got {:?}", tree.modules.len());
+    let m = &tree.modules[0];
+    assert_eq!(m.name, "tb");
+
+    // logic 変数が取れること
+    assert!(m.signals.iter().any(|s| s.name == "clk"),  "clk signal missing");
+    assert!(m.signals.iter().any(|s| s.name == "rst_n"), "rst_n signal missing");
+
+    // always_blocks が 2 つ (ClkGen + Initial)
+    assert_eq!(m.always_blocks.len(), 2, "expected 2 always blocks, got {:?}",
+        m.always_blocks.iter().map(|a| &a.kind).collect::<Vec<_>>());
+
+    let has_clkgen  = m.always_blocks.iter().any(|a| a.kind == AlwaysKind::ClkGen);
+    let has_initial = m.always_blocks.iter().any(|a| a.kind == AlwaysKind::Initial);
+    assert!(has_clkgen,  "expected AlwaysKind::ClkGen");
+    assert!(has_initial, "expected AlwaysKind::Initial");
+
+    // Initial の driven_signals に rst_n が含まれること
+    let initial = m.always_blocks.iter().find(|a| a.kind == AlwaysKind::Initial).unwrap();
+    assert!(initial.driven_signals.contains(&"rst_n".to_string()),
+        "driven_signals: {:?}", initial.driven_signals);
+}
+
 /// always_ff の case 文が Stmt::Case に変換されるか（if の中の case）
 #[test]
 fn test_always_ff_case_in_if() {

@@ -1,12 +1,15 @@
-use sv_parser::{ModuleDeclarationAnsi, RefNode, SyntaxTree, unwrap_node};
+use sv_parser::{RefNode, SyntaxTree, unwrap_node};
 use crate::types::{InstanceNode, PortConnection, ParamOverride};
 use crate::module::get_str;
 
-pub fn lower_instances(
-    m: &ModuleDeclarationAnsi,
+pub fn lower_instances<M>(
+    m: &M,
     tree: &SyntaxTree,
     _source: &str,
-) -> Result<Vec<InstanceNode>, Box<dyn std::error::Error>> {
+) -> Result<Vec<InstanceNode>, Box<dyn std::error::Error>>
+where
+    for<'a> &'a M: IntoIterator<Item = RefNode<'a>>,
+{
     let mut instances = Vec::new();
 
     for node in m {
