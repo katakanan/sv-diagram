@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "wasm": "wasm-pack build ../crates/sv-wasm --target bundler --out-dir ../web/wasm",
+    "wasm": "wasm-pack build ../crates/sv-wasm --target bundler --out-dir ../../web/wasm",
     "dev":  "vite",
     "build": "vite build",
     "preview": "vite preview"
