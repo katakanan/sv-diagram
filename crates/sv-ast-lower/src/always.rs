@@ -109,6 +109,7 @@ fn extract_always_kind(
 
 /// plain `always` ブロックの種別を判定する。
 ///
+/// - `always @(posedge/negedge ...)` → Ff（always_ff 相当）
 /// - `always #N sig = ~sig` (または `!sig`)  → ClkGen
 /// - `always #N sig = val`                    → DcDriver
 /// - それ以外                                 → Comb (フォールバック)
@@ -117,6 +118,13 @@ fn detect_plain_always_kind(
     tree: &SyntaxTree,
 ) -> AlwaysKind {
     use sv_parser::unwrap_locate;
+
+    // エッジセンシティビティリスト @(posedge/negedge ...) → Ff 相当
+    for node in always {
+        if let RefNode::EdgeIdentifier(_) = node {
+            return AlwaysKind::Ff;
+        }
+    }
 
     // トグル演算子 (~ または !) が本体内に存在する → ClkGen
     for node in always {

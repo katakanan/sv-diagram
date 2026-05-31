@@ -367,6 +367,69 @@ endmodule
     }
 }
 
+/// assign RHS に定数を含む場合 rhs 文字列が正しく取れるか
+#[test]
+fn test_assign_rhs_with_constant() {
+    let sv = r#"
+module test (
+  input  logic [7:0] hoge,
+  output logic [7:0] piyo,
+  input  logic [7:0] foo,
+  output logic [7:0] bar
+);
+  assign piyo = hoge + 1;
+endmodule
+"#;
+    let tree = lower(sv, "test.sv").unwrap();
+    let m = &tree.modules[0];
+    assert_eq!(m.assigns.len(), 1);
+    let a = &m.assigns[0];
+    assert_eq!(a.lhs, "piyo");
+    // RHS 全体の文字列として "hoge + 1" が取れること（定数込み）
+    assert!(a.rhs.contains("hoge"), "rhs: {}", a.rhs);
+    assert!(a.rhs.contains('1'),    "rhs should contain '1': {}", a.rhs);
+}
+
+/// always_comb の body AST に定数リテラルを含む代入が含まれるか
+#[test]
+fn test_always_comb_rhs_with_constant() {
+    let sv = r#"
+module test (
+  input  logic [7:0] hoge,
+  output logic [7:0] piyo,
+  input  logic [7:0] foo,
+  output logic [7:0] bar
+);
+  always_comb begin
+    bar = foo + 1;
+  end
+endmodule
+"#;
+    let tree = lower(sv, "test.sv").unwrap();
+    let m = &tree.modules[0];
+    assert_eq!(m.always_blocks.len(), 1);
+    let ab = &m.always_blocks[0];
+    assert_eq!(ab.kind, AlwaysKind::Comb);
+
+    // driven に bar が含まれること
+    assert!(ab.driven_signals.contains(&"bar".to_string()),
+        "driven_signals: {:?}", ab.driven_signals);
+
+    // read_signals に foo が含まれること
+    assert!(ab.read_signals.contains(&"foo".to_string()),
+        "read_signals: {:?}", ab.read_signals);
+
+    // body に BAssign があり、RHS に "foo" と "1" が含まれること
+    let assign_rhs = ab.body.iter().find_map(|s| {
+        if let Stmt::BAssign { lhs, rhs } = s {
+            if lhs == "bar" { Some(format!("{rhs:?}")) } else { None }
+        } else { None }
+    });
+    let rhs_str = assign_rhs.expect("BAssign(bar) not found in body");
+    assert!(rhs_str.contains("foo"), "rhs should contain foo: {rhs_str}");
+    assert!(rhs_str.contains('1'),   "rhs should contain 1: {rhs_str}");
+}
+
 /// `module foo;` (括弧なし非 ANSI) でも初期化ブロックが取れるか
 #[test]
 fn test_nonansi_module_initial() {
