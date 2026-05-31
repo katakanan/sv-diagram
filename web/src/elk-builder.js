@@ -620,6 +620,7 @@ export function buildElkGraph(tree, moduleIdx = 0) {
 
         // ── NEXT/MUX ノードを組み立て（children には後でコンパウンド経由で追加）──
         let combNode, combOutPid
+        const intraEdges = []   // コンパウンド内部フィードバックエッジ（DFF.Q→NEXT.in）
 
         if (caseInfo) {
           // ── Case MUX ─────────────────────────────────────────
@@ -675,7 +676,14 @@ export function buildElkGraph(tree, moduleIdx = 0) {
               labels:        [{ text: inSig }],
               layoutOptions: { 'port.side': 'WEST' },
             })
-            tap(inSig, combId, pid, 'sink')
+            if (inSig === sig) {
+              // フィードバックエッジ（DFF.Q → NEXT.sig_in）:
+              // 両端が同じコンパウンド内にあるため tap ではなく
+              // コンパウンドの edges[] に直接追加する（LCA ルール遵守）
+              intraEdges.push({ id: `e${eid++}`, sources: [qPid], targets: [pid] })
+            } else {
+              tap(inSig, combId, pid, 'sink')
+            }
           }
           combPorts.push({ id: combOutPid, labels: [{ text: sig }], layoutOptions: { 'port.side': 'EAST' } })
 
@@ -740,7 +748,10 @@ export function buildElkGraph(tree, moduleIdx = 0) {
         children.push({
           id: `group.${i}.${sig}`,
           children: [combNode, regNode],
-          edges: [{ id: `e${eid++}`, sources: [combOutPid], targets: [dPid] }],
+          edges: [
+            { id: `e${eid++}`, sources: [combOutPid], targets: [dPid] },  // NEXT.out → DFF.D
+            ...intraEdges,   // DFF.Q → NEXT.sig_in（フィードバック、あれば）
+          ],
           layoutOptions: {
             'elk.algorithm':    'layered',
             'elk.direction':    'RIGHT',
@@ -753,27 +764,23 @@ export function buildElkGraph(tree, moduleIdx = 0) {
         })
       }
 
-    } else {
+    } else if (always.kind === 'Comb' || always.kind === 'Latch') {
       // ── Comb / Latch: 信号ごとにノードを分割してコンパウンドでグループ化 ──
-      // case 文 → Case MUX ノード、それ以外 → 依存信号ベースの COMB/LATCH ノード
-      // always_ff と同様に group_comb.${i} コンパウンドノードで包む
       const body         = always.body ?? []
       const kindLabel    = always.kind === 'Latch' ? 'LATCH' : 'COMB'
       const groupLabel   = always.kind === 'Latch' ? 'always_latch' : 'always_comb'
-      const groupChildren = []   // コンパウンドの子ノード（root には push しない）
+      const groupChildren = []
 
       for (const sig of always.driven_signals) {
         const caseInfo = detectCaseMux(body, sig)
 
         if (caseInfo) {
-          // ── Case MUX ──────────────────────────────────────────
           const muxId  = `always.${i}.${sig}`
           const { node: muxNode, outPid } = buildCaseMuxNode(muxId, caseInfo, sig)
-          groupChildren.push(muxNode)           // コンパウンド内へ
-          tap(sig, muxId, outPid, 'source')     // 外部エッジは root に残る
+          groupChildren.push(muxNode)
+          tap(sig, muxId, outPid, 'source')
 
         } else {
-          // ── 依存信号ベースの COMB/LATCH ノード（per-signal）──
           const nid       = `always.${i}.${sig}`
           const outPid    = `${nid}.out`
           const combPorts = []
@@ -810,8 +817,6 @@ export function buildElkGraph(tree, moduleIdx = 0) {
         }
       }
 
-      // 子ノードが 1 つ以上あればコンパウンドノードとして包む
-      // 外部エッジは root の edges[] に登録済みのため内部エッジは不要
       if (groupChildren.length > 0) {
         children.push({
           id:       `group_comb.${i}`,
@@ -829,6 +834,119 @@ export function buildElkGraph(tree, moduleIdx = 0) {
           },
         })
       }
+
+    } else if (always.kind === 'ClkGen') {
+      // ── クロック発振器: always #N sig = ~sig ──────────────────
+      const nid       = `clkgen.${i}`
+      const halfPeriod = always.half_period ?? '?'
+      const periodLabel = `T=${halfPeriod}×2`
+      const outPorts  = []
+
+      for (const sig of always.driven_signals) {
+        const pid = `${nid}.${sig}`
+        outPorts.push({
+          id:            pid,
+          labels:        [{ text: sig }],
+          layoutOptions: { 'port.side': 'EAST' },
+        })
+        tap(sig, nid, pid, 'source')
+      }
+
+      const labels = [{ text: 'CLK_GEN' }, { text: periodLabel }]
+      children.push({
+        id:     nid,
+        width:  calcNodeWidth(outPorts, labels, 64),
+        height: Math.max(44, outPorts.length * 20 + 24),
+        labels,
+        ports:  outPorts,
+        layoutOptions: {
+          'portConstraints':          'FIXED_SIDE',
+          'elk.nodeLabels.placement': 'INSIDE V_TOP H_CENTER',
+        },
+      })
+
+    } else if (always.kind === 'DcDriver') {
+      // ── 定値ドライバ: always #N sig = val ────────────────────
+      const nid      = `dcdrv.${i}`
+      const val      = always.driver_value ?? '?'
+      const outPorts = []
+
+      for (const sig of always.driven_signals) {
+        const pid = `${nid}.${sig}`
+        outPorts.push({
+          id:            pid,
+          labels:        [{ text: sig }],
+          layoutOptions: { 'port.side': 'EAST' },
+        })
+        tap(sig, nid, pid, 'source')
+      }
+
+      const labels = [{ text: 'DC' }, { text: val }]
+      children.push({
+        id:     nid,
+        width:  calcNodeWidth(outPorts, labels, 48),
+        height: Math.max(44, outPorts.length * 20 + 24),
+        labels,
+        ports:  outPorts,
+        layoutOptions: {
+          'portConstraints':          'FIXED_SIDE',
+          'elk.nodeLabels.placement': 'INSIDE V_TOP H_CENTER',
+        },
+      })
+
+    } else if (always.kind === 'Initial') {
+      // ── initial begin ... end ──────────────────────────────────
+      // driven_signals → 出力ポート（EAST）: ブロッキング代入の LHS
+      // read_signals   → 入力ポート（WEST）: イベント制御・RHS 参照等
+      //   ただし同モジュールの実際の信号・ポート名のみに絞り込む
+      const nid = `initial.${i}`
+
+      // このモジュールに実在する信号・ポート名のセット
+      const moduleSignalNames = new Set([
+        ...mod.signals.map(s => s.name),
+        ...(mod.ports ?? []).map(p => p.name),
+      ])
+
+      const ports = []
+
+      // 入力ポート（読み取り信号）
+      for (const sig of (always.read_signals ?? [])) {
+        if (!moduleSignalNames.has(sig)) continue   // モジュール名等を除外
+        const pid = `${nid}.in.${sig}`
+        ports.push({
+          id:            pid,
+          labels:        [{ text: sig }],
+          layoutOptions: { 'port.side': 'WEST' },
+        })
+        tap(sig, nid, pid, 'sink')
+      }
+
+      // 出力ポート（代入信号）
+      for (const sig of (always.driven_signals ?? [])) {
+        const pid = `${nid}.out.${sig}`
+        ports.push({
+          id:            pid,
+          labels:        [{ text: sig }],
+          layoutOptions: { 'port.side': 'EAST' },
+        })
+        tap(sig, nid, pid, 'source')
+      }
+
+      // 入出力どちらもない場合はノード自体を作らない（$finish のみのブロック等）
+      if (ports.length === 0) return
+
+      const labels = [{ text: 'INITIAL' }, { text: `[${i}]` }]
+      children.push({
+        id:     nid,
+        width:  calcNodeWidth(ports, labels, 64),
+        height: Math.max(44, ports.length * 20 + 24),
+        labels,
+        ports,
+        layoutOptions: {
+          'portConstraints':          'FIXED_SIDE',
+          'elk.nodeLabels.placement': 'INSIDE V_TOP H_CENTER',
+        },
+      })
     }
   })
 

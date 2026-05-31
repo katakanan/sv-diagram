@@ -140,7 +140,7 @@ pub struct CaseItem {
     pub stmts:   Vec<Stmt>,
 }
 
-/// always_ff / always_comb / always_latch
+/// always_ff / always_comb / always_latch / ClkGen / DcDriver / Initial
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AlwaysNode {
     pub kind: AlwaysKind,
@@ -153,6 +153,12 @@ pub struct AlwaysNode {
     pub read_signals: Vec<String>,
     /// always 本体の文 AST
     pub body: Vec<Stmt>,
+    /// ClkGen: always #N の半周期値文字列（例: "5"）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub half_period: Option<String>,
+    /// DcDriver: 代入値文字列（例: "1'b0"）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub driver_value: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -160,6 +166,12 @@ pub enum AlwaysKind {
     Ff,
     Comb,
     Latch,
+    /// always #N sig = ~sig  ─ クロック発振器
+    ClkGen,
+    /// always #N sig = val   ─ 定値ドライバ
+    DcDriver,
+    /// initial begin ... end ─ テストシーケンス
+    Initial,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

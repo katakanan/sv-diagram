@@ -1,6 +1,7 @@
 # Rust / Cargo
 /target/
-Cargo.lock
+# Cargo.lock は WASM ビルドの再現性のためコミット対象
+# Cargo.lock
 
 # Claude Code
 .claude/

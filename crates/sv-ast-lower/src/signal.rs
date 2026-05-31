@@ -1,12 +1,15 @@
-use sv_parser::{ModuleDeclarationAnsi, RefNode, SyntaxTree, unwrap_node};
+use sv_parser::{RefNode, SyntaxTree, unwrap_node};
 use crate::types::{SignalNode, SignalKind, AssignNode};
 use crate::module::get_str;
 
-pub fn lower_signals_and_assigns(
-    m: &ModuleDeclarationAnsi,
+pub fn lower_signals_and_assigns<M>(
+    m: &M,
     tree: &SyntaxTree,
     _source: &str,
-) -> Result<(Vec<SignalNode>, Vec<AssignNode>), Box<dyn std::error::Error>> {
+) -> Result<(Vec<SignalNode>, Vec<AssignNode>), Box<dyn std::error::Error>>
+where
+    for<'a> &'a M: IntoIterator<Item = RefNode<'a>>,
+{
     let mut signals = Vec::new();
     let mut assigns = Vec::new();
 
