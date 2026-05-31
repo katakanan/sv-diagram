@@ -66,6 +66,93 @@ function extractIdents(expr) {
   return [...new Set(matches)].filter(w => !SV_KEYWORDS.has(w))
 }
 
+/**
+ * RHS 式文字列から数値リテラルを抽出する。
+ *
+ * 対象:
+ *   - SV サイズ付きリテラル: 8'hFF, 4'd5, 2'b01 等
+ *   - Unbased unsized: '0, '1, 'x, 'z
+ *   - 純整数: 1, 32, 0 等
+ *
+ * 除外（部分選択インデックス）:
+ *   - signal[7:0] の 7 / 0 は配線の意味を持たないため除外する
+ */
+function extractLiterals(expr) {
+  // 部分選択 [...] の中身を除去（インデックスの数値を拾わないため）
+  const stripped = expr.replace(/\[[^\]]*\]/g, '')
+
+  const result = new Set()
+
+  // SV サイズ付きリテラル: 8'hFF, 4'd5, 2'b01
+  for (const m of stripped.matchAll(/\b\d+\s*'[bBdDoOhHsS][0-9a-fA-F_xXzZ?]*/g))
+    result.add(m[0].replace(/\s+/g, ''))
+
+  // Unbased unsized: '0 '1 'x 'z
+  for (const m of stripped.matchAll(/'[01xXzZ]/g))
+    result.add(m[0])
+
+  // 純整数（サイズ付きリテラルを除去してから）
+  const noSized = stripped
+    .replace(/\b\d+\s*'[bBdDoOhHsS][0-9a-fA-F_xXzZ?]*/g, '')
+    .replace(/'[01xXzZ]/g, '')
+  for (const m of noSized.matchAll(/(?<![a-zA-Z_$.])\b(\d+)\b(?![a-zA-Z_$'])/g))
+    result.add(m[1])
+
+  return [...result]
+}
+
+/**
+ * Expr AST から数値リテラルを再帰的に収集する。
+ * Index / Slice の添字は除外する（部分選択インデックスは配線でない）。
+ */
+function collectExprLiterals(expr) {
+  if (!expr) return []
+  switch (expr.t) {
+    case 'Lit':     return [String(expr.v)]
+    case 'Raw':     return extractLiterals(expr.v)
+    case 'Ident':   return []
+    case 'Unary':   return collectExprLiterals(expr.v.operand)
+    case 'Binary':  return [...collectExprLiterals(expr.v.lhs), ...collectExprLiterals(expr.v.rhs)]
+    case 'Ternary': return [
+      ...collectExprLiterals(expr.v.c),
+      ...collectExprLiterals(expr.v.t),
+      ...collectExprLiterals(expr.v.e),
+    ]
+    case 'Index':   return collectExprLiterals(expr.v.base)   // 添字は除外
+    case 'Slice':   return collectExprLiterals(expr.v.base)   // 添字は除外
+    case 'Concat':  return expr.v.flatMap(e => collectExprLiterals(e))
+    default:        return []
+  }
+}
+
+/**
+ * always 本体の Stmt 配列から、driven_signal ごとの定数リテラル依存セットを返す。
+ * extractDepsPerSignal の定数版。
+ */
+function extractConstDepsPerSignal(body, drivenSignals) {
+  const deps = new Map(drivenSignals.map(s => [s, new Set()]))
+
+  function walk(stmts) {
+    for (const stmt of stmts) {
+      if (stmt.t === 'NbAssign' || stmt.t === 'BAssign') {
+        if (deps.has(stmt.v.lhs)) {
+          for (const lit of collectExprLiterals(stmt.v.rhs))
+            deps.get(stmt.v.lhs).add(lit)
+        }
+      } else if (stmt.t === 'If') {
+        walk(stmt.v.then_)
+        walk(stmt.v.else_)
+      } else if (stmt.t === 'Case') {
+        for (const item of stmt.v.items) walk(item.stmts)
+        walk(stmt.v.default_)
+      }
+    }
+  }
+
+  walk(body ?? [])
+  return deps
+}
+
 // ─── body AST ヘルパー ────────────────────────────────────────────
 
 /**
@@ -668,7 +755,8 @@ export function buildElkGraph(tree, moduleIdx = 0) {
           combOutPid   = `${combId}.out`
           const combPorts = []
 
-          const deps = extractDepsPerSignal(filteredBody, [sig]).get(sig) ?? new Set()
+          const deps      = extractDepsPerSignal(filteredBody, [sig]).get(sig) ?? new Set()
+          const constDeps = extractConstDepsPerSignal(filteredBody, [sig]).get(sig) ?? new Set()
           for (const inSig of deps) {
             const pid = `${combId}.in.${inSig}`
             combPorts.push({
@@ -684,6 +772,16 @@ export function buildElkGraph(tree, moduleIdx = 0) {
             } else {
               tap(inSig, combId, pid, 'sink')
             }
+          }
+          // RHS 定数リテラルを CONST ノードとして WEST 入力に追加
+          for (const lit of constDeps) {
+            const pid = `${combId}.cin.${cstCount}`
+            combPorts.push({
+              id:            pid,
+              labels:        [{ text: lit }],
+              layoutOptions: { 'port.side': 'WEST' },
+            })
+            makeConst(lit, pid)
           }
           combPorts.push({ id: combOutPid, labels: [{ text: sig }], layoutOptions: { 'port.side': 'EAST' } })
 
@@ -785,7 +883,9 @@ export function buildElkGraph(tree, moduleIdx = 0) {
           const outPid    = `${nid}.out`
           const combPorts = []
 
-          const deps = extractDepsPerSignal(body, [sig]).get(sig) ?? new Set()
+          const deps      = extractDepsPerSignal(body, [sig]).get(sig) ?? new Set()
+          const constDeps = extractConstDepsPerSignal(body, [sig]).get(sig) ?? new Set()
+
           for (const inSig of deps) {
             const pid = `${nid}.in.${inSig}`
             combPorts.push({
@@ -795,6 +895,18 @@ export function buildElkGraph(tree, moduleIdx = 0) {
             })
             tap(inSig, nid, pid, 'sink')
           }
+
+          // RHS 定数リテラルを CONST ノードとして接続
+          for (const lit of constDeps) {
+            const pid = `${nid}.cin.${cstCount}`
+            combPorts.push({
+              id:            pid,
+              labels:        [{ text: lit }],
+              layoutOptions: { 'port.side': 'WEST' },
+            })
+            makeConst(lit, pid)
+          }
+
           combPorts.push({
             id:            outPid,
             labels:        [{ text: sig }],
@@ -963,9 +1075,10 @@ export function buildElkGraph(tree, moduleIdx = 0) {
       const outerMuxId = outPortId.replace(/\.out$/, '')
       tap(assign.lhs, outerMuxId, outPortId, 'source')
     } else {
-      const rhsIdents = extractIdents(assign.rhs)
+      const rhsIdents   = extractIdents(assign.rhs)
+      const rhsLiterals = extractLiterals(assign.rhs)
 
-      if (rhsIdents.length === 0) {
+      if (rhsIdents.length === 0 && rhsLiterals.length <= 1) {
         // 純定数 assign (assign hoge = 1'd0 等):
         // assign ノードは作らず定数ノードを wire システムにソースとして直接登録する
         const label = assign.rhs.replace(/\s+/g, ' ').trim()
@@ -986,7 +1099,7 @@ export function buildElkGraph(tree, moduleIdx = 0) {
           tap(assign.lhs, cid, outPid, 'source')
         }
       } else {
-        // 識別子を含む非三項 assign → assign ノード（RHS 識別子を WEST 入力）
+        // 識別子 or 複数定数を含む非三項 assign → assign ノード（RHS 識別子・定数を WEST 入力）
         const outPid = `${nid}.out`
         const ports  = [{ id: outPid, layoutOptions: { 'port.side': 'EAST' } }]
         tap(assign.lhs, nid, outPid, 'source')
@@ -996,10 +1109,19 @@ export function buildElkGraph(tree, moduleIdx = 0) {
           ports.push({ id: inPid, layoutOptions: { 'port.side': 'WEST' } })
           tap(sig, nid, inPid, 'sink')
         }
+
+        // RHS の定数リテラルを CONST ノードとして接続
+        for (const lit of rhsLiterals) {
+          const inPid = `${nid}.cin.${cstCount}`
+          ports.push({ id: inPid, layoutOptions: { 'port.side': 'WEST' } })
+          makeConst(lit, inPid)
+        }
+
+        const allInputs = rhsIdents.length + rhsLiterals.length
         children.push({
           id: nid,
           width:  calcNodeWidth(ports, [], 12),
-          height: Math.max(20, rhsIdents.length * 12 + 8),
+          height: Math.max(20, allInputs * 12 + 8),
           labels: [],
           ports,
           layoutOptions: { 'portConstraints': 'FIXED_SIDE' },
