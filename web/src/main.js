@@ -1,5 +1,5 @@
 import ELK from 'elkjs/lib/elk.bundled.js'
-import { lower_sv } from '../wasm/sv_wasm.js'
+import { lower_sv, parse_vcd } from '../wasm/sv_wasm.js'
 import { buildElkGraph } from './elk-builder.js'
 import { renderToSvg }   from './renderer.js'
 import { EditorView, basicSetup } from 'codemirror'
@@ -759,6 +759,113 @@ moduleSelect.addEventListener('change', async () => {
   const idx = parseInt(moduleSelect.value, 10)
   await renderModule(idx)
   scrollEditorToModule(currentTree.modules[idx].name)
+})
+
+// ─── VCD 読み込み ─────────────────────────────────────────────────
+/** 警告なしで読み込むファイルサイズの上限 (5 MB) */
+const VCD_WARN_BYTES = 5 * 1024 * 1024
+
+/** 現在読み込まれている VcdData (null = 未読み込み) */
+let currentVcd = null
+
+const vcdFileInput  = document.getElementById('vcd-file-input')
+const vcdInfoEl     = document.getElementById('vcd-info')
+const vcdWarnBanner = document.getElementById('vcd-warn-banner')
+const vcdWarnText   = document.getElementById('vcd-warn-text')
+const vcdWarnOk     = document.getElementById('vcd-warn-ok')
+const vcdWarnCancel = document.getElementById('vcd-warn-cancel')
+
+/** VCD ステータス表示を更新する */
+function setVcdInfo(msg, cls = '') {
+  vcdInfoEl.textContent = msg
+  vcdInfoEl.className   = cls
+}
+
+/** 警告バナーを隠す */
+function hideVcdWarn() {
+  vcdWarnBanner.classList.remove('visible')
+  vcdWarnText.textContent = ''
+}
+
+/** VCD テキストを WASM でパースして currentVcd に格納する */
+async function loadVcdText(text, fileName) {
+  setVcdInfo('解析中...', '')
+  try {
+    const json = parse_vcd(text)
+    currentVcd = JSON.parse(json)
+
+    const sigCount = currentVcd.signals.length
+    // タイムスケール (fs 単位) × max_time → ns に変換して表示
+    const ns = (currentVcd.max_time * currentVcd.timescale_fs / 1_000_000).toFixed(1)
+    setVcdInfo(`${fileName} — ${sigCount} 信号, 最大 ${ns} ns`, 'ok')
+  } catch (e) {
+    currentVcd = null
+    setVcdInfo(`エラー: ${e.message ?? e}`, 'error')
+    console.error('VCD parse error', e)
+  }
+}
+
+// ─── DEV モード: sim/counter.vcd をワンクリックで読み込むボタンを追加 ──
+if (import.meta.env.DEV) {
+  const debugBtn = document.createElement('button')
+  debugBtn.id          = 'vcd-debug-btn'
+  debugBtn.textContent = '🔧 counter.vcd'
+  debugBtn.title       = 'sim/counter.vcd をデバッグ用に読み込む (dev only)'
+  document.getElementById('vcd-controls').appendChild(debugBtn)
+
+  debugBtn.addEventListener('click', async () => {
+    debugBtn.disabled = true
+    setVcdInfo('読み込み中...', '')
+    try {
+      const res = await fetch('/debug-sim/counter.vcd')
+      if (!res.ok) throw new Error(`HTTP ${res.status} — sim/counter.vcd が見つかりません。\nbash sim/run_sim.sh を実行してください。`)
+      const text = await res.text()
+      await loadVcdText(text, 'counter.vcd (debug)')
+    } catch (e) {
+      setVcdInfo(`エラー: ${e.message}`, 'error')
+    } finally {
+      debugBtn.disabled = false
+    }
+  })
+}
+
+/** ファイル選択時のハンドラ */
+vcdFileInput.addEventListener('change', async () => {
+  const file = vcdFileInput.files[0]
+  if (!file) return
+  hideVcdWarn()
+
+  if (file.size > VCD_WARN_BYTES) {
+    // 大きいファイル → バナーで確認を求める
+    const mb = (file.size / 1024 / 1024).toFixed(1)
+    vcdWarnText.textContent =
+      `⚠️ ファイルサイズが ${mb} MB あります。読み込みに時間がかかる場合があります。`
+    vcdWarnBanner.classList.add('visible')
+
+    // 確認ボタン
+    const onOk = async () => {
+      cleanup()
+      hideVcdWarn()
+      const text = await file.text()
+      await loadVcdText(text, file.name)
+    }
+    const onCancel = () => {
+      cleanup()
+      hideVcdWarn()
+      vcdFileInput.value = ''   // 選択をリセット
+      setVcdInfo('ファイルが選択されていません', '')
+    }
+    const cleanup = () => {
+      vcdWarnOk.removeEventListener('click', onOk)
+      vcdWarnCancel.removeEventListener('click', onCancel)
+    }
+    vcdWarnOk.addEventListener('click', onOk)
+    vcdWarnCancel.addEventListener('click', onCancel)
+  } else {
+    // 小さいファイル → 即読み込み
+    const text = await file.text()
+    await loadVcdText(text, file.name)
+  }
 })
 
 // 起動

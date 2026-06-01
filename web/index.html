@@ -97,7 +97,7 @@
       flex-shrink: 0;
     }
 
-    #editor-pane { flex: 0 0 38%; }
+    #editor-pane { flex: 0 0 38%; min-width: 0; }
     #diagram-pane { flex: 1; }
 
     /* ── CodeMirror エディタ ─────────────────────────────────── */
@@ -258,6 +258,91 @@
     }
     #status.error { color: #e03e3e; }
     #status.ok    { color: #30a030; }
+
+    /* ── VCD パネル ─────────────────────────────────────────────── */
+    #vcd-panel {
+      flex-shrink: 0;
+      border-top: 1px solid #ddd;
+      display: flex;
+      flex-direction: column;
+    }
+    #vcd-controls {
+      padding: 8px 12px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      background: #fafafa;
+    }
+    #vcd-file-label {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      background: #0071e3;
+      color: #fff;
+      border-radius: 5px;
+      padding: 4px 12px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: background 0.15s;
+      flex-shrink: 0;
+    }
+    #vcd-file-label:hover { background: #0077ed; }
+    #vcd-file-label input[type="file"] { display: none; }
+    #vcd-debug-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      background: #555;
+      color: #fff;
+      border: none;
+      border-radius: 5px;
+      padding: 4px 10px;
+      font-size: 11px;
+      cursor: pointer;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    #vcd-debug-btn:hover { background: #333; }
+    #vcd-info {
+      font-size: 12px;
+      color: #666;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      min-width: 0;
+    }
+    #vcd-info.error  { color: #e03e3e; }
+    #vcd-info.ok     { color: #30a030; }
+    #vcd-info.warn   { color: #cc7700; }
+    /* 警告バナー（大ファイル確認用） */
+    #vcd-warn-banner {
+      display: none;
+      padding: 6px 12px;
+      background: #fff3cd;
+      border-top: 1px solid #ffc107;
+      font-size: 12px;
+      color: #856404;
+      gap: 10px;
+      align-items: center;
+    }
+    #vcd-warn-banner.visible { display: flex; }
+    #vcd-warn-banner button {
+      padding: 2px 10px;
+      border-radius: 4px;
+      border: 1px solid currentColor;
+      background: transparent;
+      cursor: pointer;
+      font-size: 12px;
+      color: inherit;
+      white-space: nowrap;
+    }
+    #vcd-warn-banner button.primary {
+      background: #856404;
+      color: #fff;
+      border-color: #856404;
+    }
   </style>
 </head>
 <body>
@@ -276,6 +361,21 @@
     <div class="pane" id="editor-pane">
       <div class="pane-header">SystemVerilog Source</div>
       <div id="sv-source-editor"></div>
+      <div id="vcd-panel">
+        <div class="pane-header">VCD</div>
+        <div id="vcd-warn-banner">
+          <span id="vcd-warn-text"></span>
+          <button id="vcd-warn-ok" class="primary">読み込む</button>
+          <button id="vcd-warn-cancel">キャンセル</button>
+        </div>
+        <div id="vcd-controls">
+          <label id="vcd-file-label">
+            <input type="file" id="vcd-file-input" accept=".vcd" />
+            📂 VCD を選択
+          </label>
+          <span id="vcd-info">ファイルが選択されていません</span>
+        </div>
+      </div>
     </div>
     <div class="pane" id="diagram-pane">
       <div class="pane-header">Diagram</div>
