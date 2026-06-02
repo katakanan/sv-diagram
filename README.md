@@ -1,64 +1,76 @@
 # sv-diagram
 
-SystemVerilog モジュールの **ロジック接続を視覚化** するブラウザアプリです。
+A browser-based tool to **visualize logic connections** in SystemVerilog modules.
 
-## 概要
+## Overview
 
-SV ソースをエディタに貼り付けると、モジュール内の信号の流れをリアルタイムにダイアグラムとして表示します。
+Paste your SV source into the editor and instantly see the signal flow inside each module as an interactive diagram.
 
-- ポート・内部信号・インスタンス・`assign` 文・`always_ff`/`always_comb`/`always_latch` ブロックをノードとして配置
-- クロック発振器（`always #N clk = ~clk`）や DC ドライバ、`initial begin...end` ブロックも可視化
-- テストベンチ（ポートなしの `module tb;` 形式）にも対応
+- Ports, internal signals, instances, `assign` statements, and `always_ff`/`always_comb`/`always_latch` blocks are rendered as nodes
+- Clock oscillators (`always #N clk = ~clk`), DC drivers, and `initial begin...end` blocks are also visualized
+- Testbenches (port-less `module tb;` style) are supported
 
-## ブラウザ完結
+## Waveform Viewer
 
-**サーバーは不要です。** Rust で実装したパーサ／ローワーを [wasm-pack](https://rustwasm.github.io/wasm-pack/) で WebAssembly にコンパイルし、ブラウザ上で直接動作します。SV ソースはローカルで処理され、外部に送信されません。
+Load a VCD file to view signal waveforms alongside the diagram.
 
-## 注意事項
+- 1-bit and bus signals rendered as an SVG timing diagram
+- Time cursor with live signal value display
+- Zoom in/out on the time axis
+- **Bidirectional highlight**: click an edge in the diagram to highlight the matching waveform row, or click a signal name in the waveform to highlight the corresponding edges
+- Signal values at the cursor time are overlaid on each diagram edge
 
-> **このツールは「ロジックの接続を理解するための補助ツール」です。**
+A sample `counter.vcd` is loaded automatically on startup — just click **▶ Render** to see everything at once.
+
+## Runs Entirely in the Browser
+
+**No server required.** The parser and lowering pass are written in Rust and compiled to WebAssembly via [wasm-pack](https://rustwasm.github.io/wasm-pack/). All SV source and VCD data is processed locally and never sent anywhere.
+
+## Disclaimer
+
+> **This tool is intended as a visual aid for understanding logic connections.**
 >
-> 表示されるダイアグラムは、必ずしも設計の正確な動作・タイミング・合成結果を反映したものではありません。信号間のおおまかな接続関係を把握する用途を想定しており、フォーマル検証や合成ツールの代替にはなりません。
+> The diagrams do not necessarily reflect the exact behavior, timing, or synthesis results of a design. It is meant for getting a rough overview of signal connectivity and is not a substitute for formal verification or synthesis tools.
 
-## 使い方
+## Usage
 
-[GitHub Pages のデモページ](#) をブラウザで開き、左側のエディタに SystemVerilog ソースを入力するだけです。
+Open the [GitHub Pages demo](#) in your browser and paste your SystemVerilog source into the left-hand editor.
 
-## ローカル開発
+## Local Development
 
-### 必要なもの
+### Requirements
 
-- Rust (stable) + `wasm32-unknown-unknown` ターゲット
+- Rust (stable) + `wasm32-unknown-unknown` target
 - [wasm-pack](https://rustwasm.github.io/wasm-pack/)
 - Node.js 18+
 
-### セットアップ
+### Setup
 
 ```bash
-# WASM をビルド
+# Build WASM
 cd web
 npm run wasm
 
-# 開発サーバー起動
+# Start dev server
 npm install
 npm run dev
 ```
 
-### テスト
+### Tests
 
 ```bash
 cargo test -p sv-ast-lower
 ```
 
-## 技術スタック
+## Tech Stack
 
-| 役割 | 技術 |
+| Role | Technology |
 |---|---|
-| SV パーサ | [sv-parser](https://github.com/dalance/sv-parser) |
-| レイアウトエンジン | [ELK.js](https://github.com/kieler/elkjs) |
-| WASM バインディング | [wasm-bindgen](https://github.com/rustwasm/wasm-bindgen) |
-| フロントエンド | Vite + Vanilla JS |
+| SV parser | [sv-parser](https://github.com/dalance/sv-parser) |
+| Layout engine | [ELK.js](https://github.com/kieler/elkjs) |
+| WASM bindings | [wasm-bindgen](https://github.com/rustwasm/wasm-bindgen) |
+| Frontend | Vite + Vanilla JS |
 
-## ライセンス
+## License
 
-MIT License — 詳細は [LICENSE](LICENSE) を参照してください。
+MIT License — see [LICENSE](LICENSE) for details.
