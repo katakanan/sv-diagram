@@ -619,7 +619,7 @@ backBtn.addEventListener('click', async () => {
 })
 
 // ─── WASM 初期化 ─────────────────────────────────────────────
-function initWasm() {
+async function initWasm() {
   try {
     if (typeof lower_sv !== 'function') throw new Error('lower_sv not found')
     setStatus('準備完了', 'ok')
@@ -627,6 +627,18 @@ function initWasm() {
   } catch (e) {
     setStatus(`WASM 初期化失敗: ${e.message}`, 'error')
     console.error(e)
+    return
+  }
+
+  // サンプル VCD を自動読み込み（失敗しても無視）
+  try {
+    const res = await fetch('./sample/counter.vcd')
+    if (res.ok) {
+      const text = await res.text()
+      await loadVcdText(text, 'counter.vcd (sample)')
+    }
+  } catch (_) {
+    // ファイルが存在しない環境では何もしない
   }
 }
 
