@@ -1131,13 +1131,14 @@ export function buildElkGraph(tree, moduleIdx = 0) {
   })
 
   // ─── エッジ生成（信号ルーティング）──────────────────────────
-  for (const [, wire] of wires) {
+  for (const [signal, wire] of wires) {
     for (const src of wire.sources) {
       for (const snk of wire.sinks) {
         edges.push({
-          id: `e${eid++}`,
+          id:      `e${eid++}`,
           sources: [src.portId],
           targets: [snk.portId],
+          _signal: signal,   // 波形ビューワとの紐づけ用
         })
       }
     }

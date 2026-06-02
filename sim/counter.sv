@@ -3,14 +3,14 @@
 // sim/counter.sv と同一コード
 // ─────────────────────────────────────────────────────────────────
 module counter #(
-  parameter int unsigned WIDTH = 8
+  parameter WIDTH = 8
 )(
-  input  var logic             clk,
-  input  var logic             rst_n,
-  output var logic [WIDTH-1:0] count
+  input  wire             clk,
+  input  wire             rst_n,
+  output reg  [WIDTH-1:0] count
 );
 
-  always_ff @(posedge clk or negedge rst_n) begin
+  always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
       count <= '0;
     end else begin

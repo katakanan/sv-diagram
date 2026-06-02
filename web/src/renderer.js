@@ -237,7 +237,9 @@ export function renderToSvg(layout) {
       }
 
       // エッジグループ: data-id でクリック選択できるようにする
-      const eg = el('g', { class: 'edge', 'data-id': edge.id ?? `e${ei}` })
+      const egAttrs = { class: 'edge', 'data-id': edge.id ?? `e${ei}` }
+      if (edge._signal) egAttrs['data-signal'] = edge._signal
+      const eg = el('g', egAttrs)
 
       // 透明な太いヒットエリア（細い線でも容易にクリックできるよう）
       eg.appendChild(el('path', {
