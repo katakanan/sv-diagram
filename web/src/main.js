@@ -2,6 +2,7 @@ import ELK from 'elkjs/lib/elk.bundled.js'
 import { lower_sv, parse_vcd } from '../wasm/sv_wasm.js'
 import { buildElkGraph } from './elk-builder.js'
 import { renderToSvg }   from './renderer.js'
+import { createWaveformViewer } from './waveform-viewer.js'
 import { EditorView, basicSetup } from 'codemirror'
 import { StreamLanguage }         from '@codemirror/language'
 import { verilog }                from '@codemirror/legacy-modes/mode/verilog'
@@ -389,6 +390,7 @@ function selectNode(nodeId) {
 
   if (!selectedNodeId) {
     renderProps('Properties', '', [])
+    waveViewer?.highlightSignal(null)
     return
   }
 
@@ -473,8 +475,12 @@ function selectEdge(edgeId) {
 
     const { kind, rows } = getEdgeProps(selectedEdgeId)
     renderProps(kind, selectedEdgeId, rows)
+
+    // 対応する波形行をハイライト
+    waveViewer?.highlightSignal(edge?._signal ?? null)
   } else {
     renderProps('Properties', '', [])
+    waveViewer?.highlightSignal(null)
   }
 }
 
@@ -594,7 +600,8 @@ diagramWrap.addEventListener('dblclick', async e => {
   }
 
   // 現在位置をスタックに積んでドリルダウン
-  navStack.push({ moduleIdx: currentModuleIdx, moduleName: curModule.name })
+  // instanceName も保存して VCD スコープパスの復元に使う
+  navStack.push({ moduleIdx: currentModuleIdx, moduleName: curModule.name, instanceName })
   updateBackBtn()
   moduleSelect.value = String(targetIdx)
   await renderModule(targetIdx)
@@ -701,6 +708,9 @@ async function renderModule(moduleIdx) {
     const m         = currentTree.modules[moduleIdx]
     const nodeCount = m.instances.length + m.always_blocks.length
     setStatus(`OK — ${currentTree.modules.length} module(s), ${nodeCount} block(s)`, 'ok')
+
+    // モジュール切り替え後に波形ビューワも更新
+    refreshWaveformViewer()
   } catch (e) {
     setStatus(`エラー: ${e.message}`, 'error')
     console.error(e)
@@ -798,6 +808,9 @@ async function loadVcdText(text, fileName) {
     // タイムスケール (fs 単位) × max_time → ns に変換して表示
     const ns = (currentVcd.max_time * currentVcd.timescale_fs / 1_000_000).toFixed(1)
     setVcdInfo(`${fileName} — ${sigCount} 信号, 最大 ${ns} ns`, 'ok')
+
+    // VCD 読み込み完了 → 波形ビューワを自動表示
+    showWaveformViewer()
   } catch (e) {
     currentVcd = null
     setVcdInfo(`エラー: ${e.message ?? e}`, 'error')
@@ -807,6 +820,9 @@ async function loadVcdText(text, fileName) {
 
 // ─── DEV モード: sim/counter.vcd をワンクリックで読み込むボタンを追加 ──
 if (import.meta.env.DEV) {
+  // デバッグコンソールから波形抽出を呼べるよう公開
+  window._extractWaveforms = extractWaveformsForCurrentModule
+
   const debugBtn = document.createElement('button')
   debugBtn.id          = 'vcd-debug-btn'
   debugBtn.textContent = '🔧 counter.vcd'
@@ -868,6 +884,137 @@ vcdFileInput.addEventListener('change', async () => {
   }
 })
 
-// 起動
+// ─── VCD ↔ ダイアグラム 階層マッチング ───────────────────────────
+/**
+ * 現在表示中のモジュールに対応する VCD スコープパスを返す。
+ *
+ * navStack の各エントリに保存された instanceName を辿ることで、
+ * 階層ドリルダウンに対応したスコープを組み立てる。
+ *
+ * 例:
+ *   counter_tb を表示中 (navStack=[])
+ *     → "counter_tb"
+ *   counter_tb.u_counter にドリルダウン中
+ *   (navStack=[{moduleName:'counter_tb', instanceName:'u_counter'}])
+ *     → "counter_tb.u_counter"
+ */
+function buildVcdScope() {
+  if (!currentTree) return null
+  const mod = currentTree.modules[currentModuleIdx]
+  if (navStack.length === 0) return mod.name
+
+  // ルートのモジュール名 + 各ドリルダウン時のインスタンス名を連結
+  let scope = navStack[0].moduleName
+  for (const entry of navStack) {
+    if (entry.instanceName) scope += '.' + entry.instanceName
+  }
+  return scope
+}
+
+/**
+ * 現在表示中のモジュール階層に対応する波形データを VCD から抽出する。
+ *
+ * @returns {{ scope: string, signals: WaveSignal[] } | null}
+ *
+ * WaveSignal = {
+ *   name:    string,          // 信号名
+ *   id:      string,          // VCD ID コード
+ *   width:   number,          // ビット幅
+ *   changes: [number, string][] // (time_fs, value) 昇順
+ * }
+ */
+export function extractWaveformsForCurrentModule() {
+  if (!currentVcd || !currentTree) return null
+
+  const mod   = currentTree.modules[currentModuleIdx]
+  const scope = buildVcdScope()
+
+  // 現在モジュールの信号名セット（ポート + ローカル信号）
+  const sigNames = new Set([
+    ...mod.ports.map(p => p.name),
+    ...mod.signals.map(s => s.name),
+  ])
+
+  // ① スコープが完全一致する信号を優先
+  let matched = currentVcd.signals.filter(s =>
+    s.scope === scope && sigNames.has(s.name)
+  )
+
+  // ② スコープ一致なし → 名前一致のみでフォールバック（テストベンチ等）
+  if (matched.length === 0) {
+    matched = currentVcd.signals.filter(s => sigNames.has(s.name))
+  }
+
+  const result = matched.map(s => ({
+    name:    s.name,
+    id:      s.id,
+    width:   s.width,
+    changes: currentVcd.value_changes[s.id] ?? [],
+  }))
+
+  return { scope, signals: result }
+}
+
+// ─── 波形ビューワ ─────────────────────────────────────────────────────────────
+
+const waveformPane      = document.getElementById('waveform-pane')
+const waveformContainer = document.getElementById('waveform-container')
+const waveformCloseBtn  = document.getElementById('waveform-close-btn')
+
+/** 現在の createWaveformViewer コントローラ (null = 未作成) */
+let waveViewer = null
+
+/**
+ * 波形ビューワを開いて現在の階層の波形を表示する。
+ * VCD が未読み込みの場合は何もしない。
+ */
+function showWaveformViewer() {
+  if (!currentVcd || !currentTree) return
+
+  const waveData = extractWaveformsForCurrentModule()
+  if (!waveData || waveData.signals.length === 0) return
+
+  const viewerData = {
+    ...waveData,
+    timescale_fs: currentVcd.timescale_fs,
+    max_time:     currentVcd.max_time,
+  }
+
+  waveformPane.classList.add('visible')
+
+  // requestAnimationFrame で1フレーム待ち、ブラウザがレイアウトを確定させてから
+  // clientWidth を取得する（初回表示時に 0 になるのを防ぐ）
+  requestAnimationFrame(() => {
+    if (!waveViewer) {
+      waveViewer = createWaveformViewer(waveformContainer, viewerData)
+    } else {
+      waveViewer.update(viewerData)
+    }
+  })
+}
+
+/** 波形ビューワのデータを更新する（表示中の場合のみ）*/
+function refreshWaveformViewer() {
+  if (!waveformPane.classList.contains('visible')) return
+  showWaveformViewer()
+}
+
+waveformCloseBtn.addEventListener('click', () => {
+  waveformPane.classList.remove('visible')
+})
+
+// VCD コントロールに「波形表示」ボタンを追加
+const showWaveBtn = document.createElement('button')
+showWaveBtn.id          = 'show-wave-btn'
+showWaveBtn.textContent = '📊 波形'
+showWaveBtn.title       = '波形ビューワを表示'
+showWaveBtn.style.cssText = `
+  background: #555; color: #fff; border: none; border-radius: 5px;
+  padding: 4px 10px; font-size: 11px; cursor: pointer; white-space: nowrap; flex-shrink: 0;
+`
+showWaveBtn.addEventListener('click', showWaveformViewer)
+document.getElementById('vcd-controls').appendChild(showWaveBtn)
+
+// ─── 起動 ─────────────────────────────────────────────────────────────────────
 updateBackBtn()
 initWasm()

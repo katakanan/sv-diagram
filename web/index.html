@@ -343,6 +343,163 @@
       color: #fff;
       border-color: #856404;
     }
+
+    /* ── 波形ビューワパネル ──────────────────────────────────────── */
+    #waveform-pane {
+      flex-shrink: 0;
+      height: 220px;
+      min-height: 0;
+      display: none;           /* VCD 読み込み後に表示 */
+      flex-direction: column;
+      border-top: 2px solid #555;
+      background: #1e1e2e;
+      resize: vertical;
+      overflow: auto;
+    }
+    #waveform-pane.visible { display: flex; }
+
+    #waveform-pane .pane-header {
+      background: #181825;
+      border-bottom: 1px solid #313244;
+      color: #a6adc8;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 4px 12px;
+    }
+    #waveform-close-btn {
+      margin-left: auto;
+      background: transparent;
+      border: none;
+      color: #6c7086;
+      font-size: 14px;
+      cursor: pointer;
+      padding: 0 4px;
+      line-height: 1;
+    }
+    #waveform-close-btn:hover { color: #cdd6f4; }
+    #waveform-container { flex: 1; min-height: 0; }
+
+    /* ── waveform-viewer.js のスタイル ─────────────────────────── */
+    .wv-root {
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+      font-size: 12px;
+      color: #cdd6f4;
+      background: #1e1e2e;
+    }
+    .wv-header {
+      padding: 2px 8px;
+      font-size: 11px;
+      color: #a6adc8;
+      background: #181825;
+      border-bottom: 1px solid #313244;
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .wv-header-text {
+      flex: 1;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .wv-zoom-wrap {
+      display: flex;
+      gap: 2px;
+      flex-shrink: 0;
+    }
+    .wv-zoom-btn {
+      background: #313244;
+      color: #cdd6f4;
+      border: 1px solid #45475a;
+      border-radius: 3px;
+      min-width: 28px;
+      height: 20px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      padding: 0 4px;
+      line-height: 1;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+    }
+    .wv-zoom-btn:hover { background: #45475a; }
+    .wv-body {
+      display: flex;
+      flex: 1;
+      min-height: 0;
+      overflow: hidden;
+    }
+    .wv-label-wrap {
+      width: 128px;
+      flex-shrink: 0;
+      overflow: hidden;
+      background: #181825;
+      border-right: 1px solid #313244;
+    }
+    .wv-wave-scroll {
+      flex: 1;
+      overflow-x: auto;
+      overflow-y: hidden;
+    }
+    .wv-value-wrap {
+      width: 76px;
+      flex-shrink: 0;
+      overflow: hidden;
+      background: #181825;
+      border-left: 1px solid #313244;
+    }
+    .wv-value-svg { display: block; }
+    /* 信号行ハイライト (ダイアグラムのエッジ選択と連動) */
+    .wv-hl-rect { fill: #cba6f7; fill-opacity: 0.22; }
+    /* 値テキストの色分け */
+    .wv-val-text { font-size: 11px; font-family: 'Cascadia Code','Fira Code','Consolas',monospace; }
+    .wv-val-hi   { fill: #a6e3a1; }   /* HIGH = 緑 */
+    .wv-val-lo   { fill: #6c7086; }   /* LOW  = 暗め */
+    .wv-val-x    { fill: #f38ba8; }   /* x/z  = 赤 */
+    .wv-val-hex  { fill: #89dceb; }   /* バス値 = シアン */
+    /* 行背景 */
+    .wv-row-bg.even { fill: #1e1e2e; }
+    .wv-row-bg.odd  { fill: #181825; }
+    /* 信号名ラベル */
+    .wv-label {
+      font-size: 11px;
+      fill: #cdd6f4;
+      font-variant-ligatures: none;
+    }
+    /* 区切り線 */
+    .wv-sep { stroke: #313244; stroke-width: 0.5; }
+    /* グリッド線 */
+    .wv-grid {
+      stroke: #313244;
+      stroke-width: 0.5;
+      stroke-dasharray: 2,3;
+    }
+    /* 時刻軸 */
+    .wv-axis-bg   { fill: #12121a; }
+    .wv-axis-base { stroke: #585b70; stroke-width: 1; }
+    .wv-tick      { stroke: #585b70; stroke-width: 1; }
+    .wv-tick-label {
+      font-size: 9px;
+      fill: #a6adc8;
+      font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+    }
+    /* 1 ビット波形 */
+    .wv-1bit { stroke: #89dceb; stroke-width: 1.5; }
+    /* バス波形 */
+    .wv-bus-fill { fill: #2a2a3e; }
+    .wv-bus-edge { stroke: #89dceb; stroke-width: 1.5; }
+    .wv-bus-val  { font-size: 10px; fill: #cdd6f4; }
+    /* 不定 (x/z) */
+    .wv-x { stroke: #f38ba8; stroke-width: 1; stroke-dasharray: 3,2; }
+    /* 時刻カーソル */
+    .wv-cursor-line { stroke: #f5c2e7; stroke-width: 1.5; pointer-events: none; }
+    .wv-cursor-head { fill: #f5c2e7; pointer-events: none; }
+    .wv-wave-svg    { cursor: crosshair; display: block; }
+    .wv-label-svg   { display: block; }
   </style>
 </head>
 <body>
@@ -390,6 +547,15 @@
         </div>
       </div>
     </div>
+  </div>
+
+  <!-- 波形ビューワパネル (VCD 読み込み後に表示) -->
+  <div id="waveform-pane">
+    <div class="pane-header">
+      Waveform
+      <button id="waveform-close-btn" title="閉じる">✕</button>
+    </div>
+    <div id="waveform-container"></div>
   </div>
 
   <script type="module" src="/src/main.js"></script>

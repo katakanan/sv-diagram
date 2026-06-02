@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::HashMap;  // value_changes の型で使用
 use crate::{Signal, VcdData, VcdError};
 
 // ─── 公開エントリポイント ────────────────────────────────────────────────────
@@ -15,8 +15,10 @@ struct VcdParser<'a> {
     src:         &'a [u8],
     pos:         usize,
     scope_stack: Vec<String>,
-    /// IDコード → Signal
-    signals:     HashMap<String, Signal>,
+    /// 全 $var 宣言を順番に保持する。
+    /// iverilog は同じ ID コードを複数スコープで宣言することがあるため
+    /// HashMap ではなく Vec を使い、すべての宣言を保持する。
+    signals:     Vec<Signal>,
     timescale_fs: u64,
 }
 
@@ -26,7 +28,7 @@ impl<'a> VcdParser<'a> {
             src:          input.as_bytes(),
             pos:          0,
             scope_stack:  Vec::new(),
-            signals:      HashMap::new(),
+            signals:      Vec::new(),
             timescale_fs: 1_000_000, // デフォルト 1 ns
         }
     }
@@ -49,7 +51,7 @@ impl<'a> VcdParser<'a> {
         }
 
         // 信号を収集してスコープ・名前順にソート
-        let mut signals: Vec<Signal> = self.signals.values().cloned().collect();
+        let mut signals: Vec<Signal> = self.signals.clone();
         signals.sort_by(|a, b| a.scope.cmp(&b.scope).then(a.name.cmp(&b.name)));
 
         Ok(VcdData {
@@ -129,10 +131,7 @@ impl<'a> VcdParser<'a> {
 
         let scope = self.scope_stack.join(".");
 
-        self.signals.insert(
-            id.clone(),
-            Signal { id, name, scope, width, var_type },
-        );
+        self.signals.push(Signal { id, name, scope, width, var_type });
         Ok(())
     }
 
@@ -305,11 +304,12 @@ fn parse_timescale_str(s: &str) -> Option<u64> {
 /// 信号幅が不明な場合はそのまま返す。
 fn normalize_vector_value(
     raw_val: &str,
-    signals: &HashMap<String, Signal>,
+    signals: &[Signal],
     id: &str,
 ) -> String {
     let width = signals
-        .get(id)
+        .iter()
+        .find(|s| s.id == id)
         .map(|s| s.width as usize)
         .unwrap_or(0);
 
