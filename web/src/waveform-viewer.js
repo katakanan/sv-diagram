@@ -236,7 +236,8 @@ export function createWaveformViewer(container, data) {
   let ppn            = 1        // pixels per ns (再計算で更新)
   let zoomFactor     = 1.0      // ユーザーが操作する時間軸ズーム倍率
   let cursorFs       = 0        // カーソル時刻 (fs 単位)
-  const moveListeners = []
+  const moveListeners  = []
+  const clickListeners = []     // 信号名クリック時コールバック
   const cleanups     = []       // destroy 時に解除するイベントリスナー
 
   const ZOOM_STEP = 1.5
@@ -285,6 +286,16 @@ export function createWaveformViewer(container, data) {
   const labelWrap = document.createElement('div')
   labelWrap.className = 'wv-label-wrap'
   bodyEl.appendChild(labelWrap)
+
+  // ラベル行クリック → 信号名コールバック
+  labelWrap.addEventListener('click', e => {
+    const rect = labelWrap.getBoundingClientRect()
+    const i    = Math.floor((e.clientY - rect.top) / ROW_H)
+    if (i >= 0 && i < currentData.signals.length) {
+      const sigName = currentData.signals[i].name
+      for (const fn of clickListeners) fn(sigName)
+    }
+  })
 
   // 値表示エリア（カーソル位置の信号値）— ラベルと波形の間
   const valueWrap = document.createElement('div')
@@ -646,6 +657,9 @@ export function createWaveformViewer(container, data) {
 
     /** カーソル移動時に呼ばれるコールバックを登録する */
     onCursorMove(fn) { moveListeners.push(fn) },
+
+    /** 信号名ラベルクリック時に呼ばれるコールバックを登録する */
+    onSignalClick(fn) { clickListeners.push(fn) },
 
     /** 指定した信号名の行をハイライトする（null で全解除） */
     highlightSignal(name) { highlightSignal(name) },
