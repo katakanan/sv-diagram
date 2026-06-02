@@ -34,7 +34,7 @@ A sample `counter.vcd` is loaded automatically on startup — just click **▶ R
 
 ## Usage
 
-Open the [GitHub Pages demo](#) in your browser and paste your SystemVerilog source into the left-hand editor.
+Open the [GitHub Pages demo](https://katakanan.github.io/sv-diagram/) in your browser and paste your SystemVerilog source into the left-hand editor.
 
 ## Local Development
 
